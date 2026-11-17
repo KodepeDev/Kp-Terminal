@@ -1,0 +1,19 @@
+[package]
+name = "kp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+portable-pty = "0.9"
+vt100 = "0.18"
+crossterm = "0.29"
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+serde = { version = "1", features = ["derive"] }
+toml = { version = "1", default-features = false, features = ["parse", "serde"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
