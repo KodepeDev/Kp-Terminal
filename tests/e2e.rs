@@ -88,7 +88,7 @@ impl Kp {
 #[test]
 fn drives_tui() {
     let kp = Kp::start(&std::env::temp_dir());
-    kp.wait_for(20, "sidebar con shell", |s| s.contains("kp") && s.contains("1 shell"));
+    kp.wait_for(20, "pestaña con shell", |s| s.contains("1 shell"));
 
     // Paleta (Ctrl+Space p) y salir con Esc.
     kp.send(PREFIX);
@@ -108,6 +108,12 @@ fn drives_tui() {
     kp.wait_for(20, "salida de kp ctl list", |s| {
         s.split_once("ctl list").is_some_and(|(_, out)| out.contains('1') && out.contains('2') && out.contains("shell"))
     });
+    // Bloque estilo Warp: etiqueta ✔ con duración y selección con Ctrl+↑.
+    kp.wait_for(20, "bloque terminado con ✔", |s| s.contains("✔ "));
+    kp.send(b"[1;5A");
+    kp.wait_for(20, "modo bloques", |s| s.contains("BLOQUES"));
+    kp.send(ESC);
+    kp.wait_for(20, "salida del modo bloques", |s| !s.contains("BLOQUES"));
 
     // Vista grid.
     kp.send(PREFIX);
@@ -196,7 +202,8 @@ fn real_agent() {
     std::thread::sleep(Duration::from_secs(3));
     kp.wait_for(60, "estado correcto de claude", |s| {
         // Diálogo de confianza = bloqueado esperando al usuario; si no, prompt libre = idle.
-        if s.contains("trust this folder") { s.contains("claude blocked") } else { s.contains("claude idle") }
+        // Pestaña: ▲ = bloqueado, ○ = idle.
+        if s.contains("trust this folder") { s.contains("▲ 2 claude") } else { s.contains("○ 2 claude") }
     });
     println!("{}", kp.screen());
     kp.quit();
@@ -252,10 +259,26 @@ fn snapshots() {
     git(&dir, &["init", "-q", "-b", "main"]);
     std::fs::write(dir.join("app.rs"), "fn main() {\n    println!(\"hola\");\n}\n").unwrap();
     let kp = Kp::start(&dir);
-    kp.wait_for(20, "sidebar", |s| s.contains("1 shell"));
-    std::thread::sleep(Duration::from_secs(2));
-    kp.send(if cfg!(windows) { b"Get-ChildItem; Write-Host 'listo' -ForegroundColor Green\r" } else { b"ls --color; echo listo\r" });
-    std::thread::sleep(Duration::from_secs(2));
+    kp.wait_for(20, "pestaña", |s| s.contains("1 shell"));
+    kp.wait_for(30, "editor", |s| s.contains("escribe un comando"));
+    if cfg!(windows) {
+        kp.send(b"Get-ChildItem\r");
+        kp.wait_for(20, "bloque 1", |s| s.matches("✔").count() >= 1);
+        kp.send(b"cmd /c exit 2\r");
+        kp.wait_for(20, "bloque fallido", |s| s.contains("✘ 2"));
+        kp.send(b"Write-Host 'hola desde kp' -ForegroundColor Green\r");
+        kp.wait_for(20, "bloque 3", |s| s.matches("✔").count() >= 2);
+        kp.send(b"Get-Ch");
+        std::thread::sleep(Duration::from_millis(500));
+        snapshot_html(&kp, "0-warp-editor");
+        kp.send(b"\x1b[1;5A");
+        kp.wait_for(20, "modo bloques", |s| s.contains("BLOQUES"));
+        kp.send(b"\x1b[1;5A");
+        std::thread::sleep(Duration::from_millis(400));
+        snapshot_html(&kp, "0b-bloque-seleccionado");
+        kp.send(ESC);
+        kp.send(ESC);
+    }
     kp.send(PREFIX);
     kp.send(b"n");
     kp.wait_for(20, "2 shell", |s| s.contains("2 shell"));

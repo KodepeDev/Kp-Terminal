@@ -1,8 +1,10 @@
 mod config;
 mod ctl;
+mod editor;
 mod git;
 mod keys;
 mod session;
+mod shell;
 mod ui;
 
 use config::{Config, THEMES, Theme};
@@ -91,7 +93,15 @@ pub struct App {
     /// Zonas clicables calculadas en el último render.
     pub hit_new: ratatui::layout::Rect,
     pub hit_toasts: Vec<(ratatui::layout::Rect, usize)>,
+    pub hit_tabs: Vec<(ratatui::layout::Rect, usize)>,
+    pub hit_plus: ratatui::layout::Rect,
+    /// Zona donde se dibuja la terminal de la sesión enfocada (clic = seleccionar bloque).
+    pub hit_body: ratatui::layout::Rect,
     last_clock: u64,
+    /// Historial global de comandos del editor.
+    pub history: editor::History,
+    /// Bloque seleccionado en la sesión enfocada (modo bloques).
+    pub block_sel: Option<usize>,
 }
 
 /// Coincidencia difusa: posiciones de `s` donde aparecen, en orden, las letras de `q`.
@@ -133,7 +143,12 @@ impl App {
             started: Instant::now(),
             hit_new: Default::default(),
             hit_toasts: vec![],
+            hit_tabs: vec![],
+            hit_plus: Default::default(),
+            hit_body: Default::default(),
             last_clock: 0,
+            history: editor::History::load(None),
+            block_sel: None,
         }
     }
 
@@ -156,6 +171,9 @@ impl App {
     pub fn set_focus(&mut self, i: usize) {
         if i < self.sessions.len() {
             let changed = i != self.focus;
+            if changed {
+                self.block_sel = None;
+            }
             self.focus = i;
             self.sessions[i].attention = false;
             if changed && self.git.is_some() {
@@ -164,11 +182,13 @@ impl App {
         }
     }
 
-    /// Redimensiona todas las sesiones al área principal (la llama ui::draw).
+    /// Redimensiona las sesiones al área principal (la llama ui::draw). Los shells con bloques reservan
+    /// la columna del margen y las filas del editor.
     pub fn resize(&mut self, rows: u16, cols: u16) {
-        if self.pane != (rows, cols) {
-            self.pane = (rows, cols);
-            self.sessions.iter_mut().for_each(|s| s.resize(rows, cols));
+        self.pane = (rows, cols);
+        for s in &mut self.sessions {
+            let (r, c) = if s.integrated { (rows.saturating_sub(ui::EDITOR_H), cols.saturating_sub(1)) } else { (rows, cols) };
+            s.resize(r.max(1), c.max(1));
         }
     }
 
@@ -188,7 +208,8 @@ impl App {
         self.next_id += 1;
         let mut env = self.env.clone();
         env.push(("KP_SESSION", id.to_string()));
-        let s = Session::spawn(id, name, p.agent, &p.cmd, &cwd, self.pane, self.cfg.scrollback, &env, self.tx.clone())?;
+        let integrate = !p.agent && self.cfg.blocks;
+        let s = Session::spawn(id, name, p.agent, &p.cmd, &cwd, self.pane, self.cfg.scrollback, &env, integrate, self.tx.clone())?;
         self.sessions.push(s);
         if focus || self.sessions.len() == 1 {
             self.set_focus(self.sessions.len() - 1);
@@ -353,15 +374,79 @@ impl App {
                 self.git_req(req);
             }
             Mode::Normal if self.grid => self.grid_key(k),
-            Mode::Normal => {
-                if let Some(s) = self.cur() {
-                    if s.scroll > 0 {
-                        s.scroll_by(-(s.scroll as i32));
-                    }
-                    let bytes = keys::encode(&k, s.parser.screen().application_cursor());
-                    s.write(&bytes);
+            Mode::Normal if self.block_sel.is_some() => self.block_key(k),
+            Mode::Normal => self.session_key(k),
+        }
+    }
+
+    /// Tecla para la sesión enfocada: al editor si el shell espera un comando; si no, tal cual al PTY.
+    fn session_key(&mut self, k: KeyEvent) {
+        let Some(s) = self.sessions.get_mut(self.focus) else { return };
+        if s.editor_active() {
+            let cwd = s.cwd.clone();
+            match s.editor.key(k, &self.history, &cwd) {
+                editor::Out::Submit(cmd) => {
+                    self.history.push(&cmd);
+                    s.submit(&cmd);
                 }
+                editor::Out::Pass => s.write(&keys::encode(&k, false)),
+                editor::Out::Scroll(n) => s.scroll_by(n),
+                editor::Out::Blocks => self.move_block(-1),
+                editor::Out::None => {}
             }
+            return;
+        }
+        if s.scroll > 0 {
+            s.scroll_by(-(s.scroll as i32));
+        }
+        let bytes = keys::encode(&k, s.parser.screen().application_cursor());
+        s.write(&bytes);
+    }
+
+    /// Mueve la selección de bloques (sin selección: empieza por el último). Pasado el final, sale.
+    fn move_block(&mut self, delta: i32) {
+        let Some(s) = self.sessions.get_mut(self.focus) else { return };
+        let ids: Vec<usize> = (0..s.blocks.len()).filter(|&i| !s.blocks[i].cmd.is_empty()).collect();
+        let Some(&last) = ids.last() else {
+            self.msg = "todavía no hay bloques en esta sesión".into();
+            return;
+        };
+        let pos = self.block_sel.and_then(|b| ids.iter().position(|&i| i == b));
+        let next = match pos {
+            None => Some(last),
+            Some(p) => ids.get((p as i32 + delta).max(0) as usize).copied(),
+        };
+        self.block_sel = next;
+        match next {
+            Some(i) => s.reveal(s.blocks[i].prompt),
+            None => s.scroll_by(-(s.scroll as i32)),
+        }
+    }
+
+    fn block_key(&mut self, k: KeyEvent) {
+        let (Some(i), Some(s)) = (self.block_sel, self.sessions.get_mut(self.focus)) else {
+            self.block_sel = None;
+            return;
+        };
+        match k.code {
+            K::Up | K::Char('k') => self.move_block(-1),
+            K::Down | K::Char('j') => self.move_block(1),
+            K::Char(c @ ('c' | 'o')) => {
+                let text = s.block_text(i, c == 'c');
+                copy_to_clipboard(&text);
+                self.msg = format!("copiado al portapapeles ({} líneas)", text.lines().count());
+            }
+            K::Char('r') => {
+                let cmd = s.blocks[i].cmd.clone();
+                s.editor.set(&cmd);
+                self.block_sel = None;
+                s.scroll_by(-(s.scroll as i32));
+            }
+            K::Esc | K::Enter | K::Char('q') => {
+                self.block_sel = None;
+                s.scroll_by(-(s.scroll as i32));
+            }
+            _ => {}
         }
     }
 
@@ -472,7 +557,20 @@ impl App {
                 }
                 return;
             }
-            if hit(&self.hit_new) {
+            if let Some(&(_, i)) = self.hit_tabs.iter().find(|(r, _)| hit(r)) {
+                self.git = None;
+                self.grid = false;
+                return self.set_focus(i);
+            }
+            if self.git.is_none() && !self.grid && hit(&self.hit_body) {
+                if let Some(s) = self.sessions.get(self.focus).filter(|s| s.integrated) {
+                    let line = s.top_line() + (m.row - self.hit_body.y) as u64;
+                    let i = s.block_at(line).filter(|&i| !s.blocks[i].cmd.is_empty());
+                    self.block_sel = if i == self.block_sel { None } else { i };
+                    return;
+                }
+            }
+            if hit(&self.hit_new) || hit(&self.hit_plus) {
                 self.input.clear();
                 self.sel = 0;
                 self.mode = Mode::Palette;
@@ -578,7 +676,11 @@ impl App {
                 _ if self.git.is_some() => self.git.as_mut().unwrap().paste(&text),
                 _ => {
                     if let Some(s) = self.cur() {
-                        s.paste(&text);
+                        if s.editor_active() {
+                            s.editor.insert(&text);
+                        } else {
+                            s.paste(&text);
+                        }
                     }
                 }
             },
@@ -624,6 +726,13 @@ impl App {
         let animating = self.sessions.iter().any(|s| s.status == Status::Working);
         changed || animating || tick_clock || n != self.toasts.len()
     }
+}
+
+/// Copia al portapapeles del sistema a través del terminal anfitrión (OSC 52).
+fn copy_to_clipboard(text: &str) {
+    let seq = format!("\x1b]52;c;{}\x07", shell::base64(text.as_bytes()));
+    let _ = std::io::stdout().write_all(seq.as_bytes());
+    let _ = std::io::stdout().flush();
 }
 
 const HELP: &str = "kp — terminal para orquestar agentes de desarrollo
@@ -679,6 +788,8 @@ fn run(project: PathBuf) -> std::io::Result<()> {
     let mut term = ratatui::init();
     execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     let mut app = App::new(cfg, project, env, tx);
+    app.sidebar = app.cfg.sidebar;
+    app.history = editor::History::load(Some(config::path().with_file_name("history")));
     app.resize(term.size()?.height.saturating_sub(2), term.size()?.width.saturating_sub(ui::SIDEBAR));
     if let Err(e) = app.spawn(app.shell_preset(), false, None, true) {
         app.msg = e;

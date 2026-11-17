@@ -11,6 +11,8 @@ use std::path::Path;
 use std::time::Duration;
 
 pub const SIDEBAR: u16 = 30;
+/// Filas reservadas para el editor de comandos en shells con bloques.
+pub const EDITOR_H: u16 = 3;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 pub fn grid_cols(n: usize) -> usize {
@@ -87,32 +89,20 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     f.render_widget(Block::new().style(Style::new().bg(t.bg).fg(t.fg)), f.area());
 
     let [side, right] = Layout::horizontal([Constraint::Length(app.sidebar_w()), Constraint::Min(1)]).areas(f.area());
-    let [main, bar] = Layout::vertical([Constraint::Min(2), Constraint::Length(1)]).areas(right);
-    let [head, body] = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).areas(main);
+    let [tabs_row, main, bar] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(2), Constraint::Length(1)]).areas(right);
     // Tamaño estable para los agentes, sin importar qué vista esté encima.
-    app.resize(body.height, body.width);
+    app.resize(main.height, main.width);
 
     app.hit_new = if side.width > 0 { sidebar(f, side, app, &t, frame) } else { Rect::default() };
+    (app.hit_tabs, app.hit_plus) = tabs(f, tabs_row, app, &t, frame);
+    app.hit_body = Rect::default();
     if let Some(g) = app.git.as_mut() {
         g.draw(f, main, &t);
     } else if app.grid {
         grid(f, main, app, &t, frame);
-    } else if let Some(s) = app.sessions.get(app.focus) {
-        header(f, head, s, &t, frame);
-        let scr = s.parser.screen();
-        draw_screen(f.buffer_mut(), body, scr, 0, &t);
-        if s.scroll == 0 && !scr.hide_cursor() && app.mode == Mode::Normal {
-            let (r, c) = scr.cursor_position();
-            f.set_cursor_position(Position::new(body.x + c, body.y + r));
-        }
-        if s.scroll > 0 {
-            let tag = format!(" ↑ historial {} · cualquier tecla vuelve ", s.scroll);
-            let w = (tag.chars().count() as u16).min(body.width);
-            f.render_widget(
-                Paragraph::new(tag).style(Style::new().bg(t.accent).fg(t.on_accent).add_modifier(Modifier::BOLD)),
-                Rect::new(body.right() - w, body.y, w, 1),
-            );
-        }
+    } else if app.sessions.get(app.focus).is_some() {
+        app.hit_body = session_view(f, main, app, &t, frame);
     } else {
         welcome(f, main, &t);
     }
@@ -125,28 +115,304 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     app.hit_toasts = toasts(f, main, app, &t);
 }
 
-/// Cabecera de la sesión enfocada: estado, nombre, tarea, rama, carpeta y tiempo en ese estado.
-fn header(f: &mut Frame, area: Rect, s: &Session, t: &Theme, frame: usize) {
-    let (ic, col) = icon(s, t, frame);
-    let right = format!(
-        "{}{}  ·  {} ",
-        s.branch.as_ref().map_or(String::new(), |b| format!("⎇ {b}  ·  ")),
-        short_path(&s.cwd),
-        elapsed(s.since.elapsed())
-    );
-    let rw = (right.chars().count() as u16).min(area.width / 2);
-    let mut left = vec![
-        Span::styled(format!(" {ic} {} ", s.status.label()), Style::new().bg(col).fg(t.on_accent).add_modifier(Modifier::BOLD)),
-        Span::styled(format!(" {} ", s.name), Style::new().fg(t.fg).add_modifier(Modifier::BOLD)),
-    ];
-    if s.agent && !s.title().is_empty() {
-        left.push(Span::styled(format!(" {}", s.title()), Style::new().fg(t.dim)));
+/// Pestañas estilo Warp + información de la sesión enfocada a la derecha. Devuelve zonas clicables.
+fn tabs(f: &mut Frame, area: Rect, app: &App, t: &Theme, frame: usize) -> (Vec<(Rect, usize)>, Rect) {
+    f.render_widget(Block::new().style(Style::new().bg(t.bar_bg)), area);
+    let info = app.sessions.get(app.focus).map(|s| {
+        format!(
+            " {}{}  ·  {} ",
+            s.branch.as_ref().map_or(String::new(), |b| format!("⎇ {b}  ·  ")),
+            short_path(&s.cwd),
+            elapsed(s.since.elapsed())
+        )
+    });
+    let info_w = info.as_ref().map_or(0, |i| i.chars().count() as u16);
+    let room = area.width.saturating_sub(if info_w < area.width / 2 { info_w } else { 0 });
+    let mut hits = vec![];
+    let mut x = area.x;
+    for (i, s) in app.sessions.iter().enumerate() {
+        let (ic, col) = icon(s, t, frame);
+        let label = format!(" {ic} {} {} ", i + 1, truncate(&s.name, 16));
+        let w = label.chars().count() as u16 + 1;
+        if x + w + 4 > area.x + room {
+            break;
+        }
+        let active = i == app.focus;
+        let r = Rect::new(x, area.y, w, 1);
+        let name_fg = if s.attention { t.done } else if active { t.fg } else { t.dim };
+        let mut style = Style::new().fg(name_fg);
+        if active {
+            style = style.bg(t.bg).add_modifier(Modifier::BOLD);
+        }
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(if active { "▎" } else { " " }, style.fg(t.accent)),
+                Span::styled(format!(" {ic}"), style.fg(col)),
+                Span::styled(format!(" {} {} ", i + 1, truncate(&s.name, 16)), style),
+            ])),
+            r,
+        );
+        hits.push((r, i));
+        x += w;
     }
-    f.render_widget(Paragraph::new(Line::from(left)).style(Style::new().bg(t.bar_bg)), area);
-    f.render_widget(
-        Paragraph::new(truncate(&right, rw as usize)).style(Style::new().bg(t.bar_bg).fg(t.dim)),
-        Rect::new(area.right() - rw, area.y, rw, 1),
-    );
+    let plus = Rect::new(x, area.y, 3.min(area.right().saturating_sub(x)), 1);
+    f.render_widget(Paragraph::new(" + ").style(Style::new().fg(t.accent).add_modifier(Modifier::BOLD)), plus);
+    if let Some(info) = info.filter(|_| info_w < area.width / 2) {
+        f.render_widget(
+            Paragraph::new(info).style(Style::new().fg(t.dim)),
+            Rect::new(area.right() - info_w, area.y, info_w, 1),
+        );
+    }
+    (hits, plus)
+}
+
+/// Terminal de la sesión enfocada. En shells integrados: margen de bloques, etiquetas de estado y editor.
+/// Devuelve la zona de la rejilla de la terminal.
+fn session_view(f: &mut Frame, area: Rect, app: &App, t: &Theme, frame: usize) -> Rect {
+    let s = &app.sessions[app.focus];
+    let scr = s.parser.screen();
+    if !s.integrated {
+        draw_screen(f.buffer_mut(), area, scr, 0, t);
+        if s.scroll == 0 && !scr.hide_cursor() && app.mode == Mode::Normal {
+            let (r, c) = scr.cursor_position();
+            f.set_cursor_position(Position::new(area.x + c, area.y + r));
+        }
+        scroll_tag(f, area, s, t);
+        return area;
+    }
+    let eh = EDITOR_H.min(area.height.saturating_sub(1));
+    let grid = Rect::new(area.x + 1, area.y, area.width.saturating_sub(1), area.height - eh);
+    let ed = Rect::new(area.x, grid.bottom(), area.width, eh);
+    draw_screen(f.buffer_mut(), grid, scr, 0, t);
+
+    // Bloques: margen de color por resultado, cabecera tintada con ✔/✘ y duración, selección resaltada.
+    let top = s.top_line();
+    for y in 0..grid.height {
+        let line = top + y as u64;
+        let Some(i) = s.block_at(line) else { continue };
+        let b = &s.blocks[i];
+        if b.cmd.is_empty() {
+            continue;
+        }
+        let selected = app.block_sel == Some(i);
+        let col = match b.exit {
+            _ if b.running() => t.working,
+            Some(0) => t.done,
+            Some(_) => t.waiting,
+            None => t.dim,
+        };
+        let buf = f.buffer_mut();
+        if let Some(c) = buf.cell_mut((area.x, grid.y + y)) {
+            c.set_symbol(if selected { "┃" } else { "▎" }).set_fg(if selected { t.accent } else { col }).set_bg(t.bg);
+        }
+        let header = line == b.prompt;
+        if header || selected {
+            let tint = if selected { t.sel_bg } else { t.bar_bg };
+            for x in grid.x..grid.right() {
+                if let Some(c) = buf.cell_mut((x, grid.y + y)) {
+                    if c.bg == t.bg {
+                        c.set_bg(tint);
+                    }
+                }
+            }
+        }
+        if header {
+            let badge = match (b.running(), b.exit, b.dur) {
+                (true, ..) => format!(" {} {} ", SPINNER[frame % SPINNER.len()], elapsed(b.started.map_or(Duration::ZERO, |s| s.elapsed()))),
+                (false, Some(0), Some(d)) => format!(" ✔ {} ", fmt_dur(d)),
+                (false, Some(code), Some(d)) => format!(" ✘ {code} · {} ", fmt_dur(d)),
+                (false, None, Some(d)) => format!(" {} ", fmt_dur(d)),
+                // Tecleado directamente en el shell: resultado sin duración.
+                (false, Some(0), None) => " ✔ ".into(),
+                (false, Some(code), None) => format!(" ✘ {code} "),
+                _ => String::new(),
+            };
+            let w = badge.chars().count() as u16;
+            if w > 0 && w < grid.width {
+                f.render_widget(
+                    Paragraph::new(badge).style(Style::new().fg(col).bg(if selected { t.sel_bg } else { t.bar_bg }).add_modifier(Modifier::BOLD)),
+                    Rect::new(grid.right() - w, grid.y + y, w, 1),
+                );
+            }
+        }
+    }
+    // Como en Warp, el prompt vivo del shell no se muestra: se escribe en el editor de abajo.
+    if s.editor_active() {
+        if let Some(live) = s.blocks.last().filter(|b| b.cmd.is_empty()) {
+            let from = live.prompt.saturating_sub(top).min(grid.height as u64) as u16;
+            let buf = f.buffer_mut();
+            for y in from..grid.height {
+                for x in grid.x..grid.right() {
+                    if let Some(c) = buf.cell_mut((x, grid.y + y)) {
+                        c.set_symbol(" ").set_style(Style::new().bg(t.bg));
+                    }
+                }
+            }
+        }
+    }
+    scroll_tag(f, grid, s, t);
+    editor_box(f, ed, grid, app, s, t, frame);
+    grid
+}
+
+fn fmt_dur(d: Duration) -> String {
+    if d.as_secs() >= 60 { elapsed(d) } else { format!("{:.1}s", d.as_secs_f32()) }
+}
+
+fn scroll_tag(f: &mut Frame, area: Rect, s: &Session, t: &Theme) {
+    if s.scroll > 0 {
+        let tag = format!(" ↑ historial {} · cualquier tecla vuelve ", s.scroll);
+        let w = (tag.chars().count() as u16).min(area.width);
+        f.render_widget(
+            Paragraph::new(tag).style(Style::new().bg(t.accent).fg(t.on_accent).add_modifier(Modifier::BOLD)),
+            Rect::new(area.right() - w, area.y, w, 1),
+        );
+    }
+}
+
+/// Resaltado sencillo: comando en acento, opciones atenuadas, cadenas en verde.
+fn highlight<'a>(line: &'a str, first_line: bool, t: &Theme) -> Vec<Span<'a>> {
+    let mut spans = vec![];
+    let mut quote: Option<char> = None;
+    let mut first = first_line;
+    let mut start = 0;
+    let flush = |spans: &mut Vec<Span<'a>>, seg: &'a str, first: &mut bool, quoted: bool| {
+        if seg.is_empty() {
+            return;
+        }
+        let style = if quoted {
+            Style::new().fg(t.done)
+        } else if *first && !seg.trim().is_empty() {
+            *first = false;
+            Style::new().fg(t.accent).add_modifier(Modifier::BOLD)
+        } else if seg.starts_with('-') {
+            Style::new().fg(t.dim)
+        } else {
+            Style::new().fg(t.fg)
+        };
+        spans.push(Span::styled(seg, style));
+    };
+    for (i, c) in line.char_indices() {
+        match quote {
+            Some(q) if c == q => {
+                flush(&mut spans, &line[start..i + 1], &mut first, true);
+                start = i + 1;
+                quote = None;
+            }
+            Some(_) => {}
+            None if c == '"' || c == '\'' => {
+                flush(&mut spans, &line[start..i], &mut first, false);
+                start = i;
+                quote = Some(c);
+            }
+            None if c == ' ' => {
+                flush(&mut spans, &line[start..i], &mut first, false);
+                spans.push(Span::raw(" "));
+                start = i + 1;
+            }
+            None => {}
+        }
+    }
+    flush(&mut spans, &line[start..], &mut first, quote.is_some());
+    spans
+}
+
+/// Caja del editor (estilo Warp). Crece hacia arriba con comandos multilínea.
+#[allow(clippy::too_many_arguments)]
+fn editor_box(f: &mut Frame, area: Rect, grid: Rect, app: &App, s: &Session, t: &Theme, frame: usize) {
+    let ed = &s.editor;
+    let active = s.editor_active() && app.block_sel.is_none();
+    let lines: Vec<&str> = if ed.buf.is_empty() { vec![""] } else { ed.buf.split('\n').collect() };
+    let h = (lines.len() as u16 + 2).max(area.height).min(area.height + grid.height / 2);
+    let r = Rect::new(area.x, area.bottom() - h, area.width, h);
+    f.render_widget(Clear, r);
+    let title = format!(" {}{} ", short_path(&s.cwd), s.branch.as_ref().map_or(String::new(), |b| format!("  ⎇ {b}")));
+    let hint = if app.block_sel.is_some() {
+        " ↑↓ bloques · c copiar · o salida · r reutilizar · Esc volver "
+    } else {
+        " Enter ejecutar · ⇧Enter línea · ↑ historial · → sugerencia · Tab completar · Ctrl+↑ bloques "
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(if active { t.accent } else { t.dim }))
+        .style(Style::new().bg(t.bar_bg))
+        .title(Span::styled(title, Style::new().fg(t.accent).add_modifier(Modifier::BOLD)))
+        .title_bottom(Line::styled(hint, Style::new().fg(t.dim)).right_aligned());
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+
+    if !active && app.block_sel.is_none() {
+        // Un comando está corriendo: las teclas van al programa.
+        let running = s.blocks.iter().rev().find(|b| b.running());
+        let text = match running {
+            Some(b) => format!(
+                " {} ejecutando  {}  · {} · las teclas van al programa · Ctrl+C cancela",
+                SPINNER[frame % SPINNER.len()],
+                truncate(&b.cmd, 40),
+                elapsed(b.started.map_or(Duration::ZERO, |s| s.elapsed()))
+            ),
+            None => " la app tiene el control de la terminal · las teclas van al programa".into(),
+        };
+        f.render_widget(Paragraph::new(text).style(Style::new().fg(t.working)), inner);
+        return;
+    }
+
+    // Texto con resaltado; desplazamiento horizontal si el cursor se sale.
+    let before = &ed.buf[..ed.cur];
+    let cur_row = before.matches('\n').count();
+    let cur_col = before.rsplit('\n').next().unwrap_or("").chars().count() as u16;
+    let prompt_w = 2u16;
+    let avail = inner.width.saturating_sub(prompt_w + 1);
+    let hscroll = cur_col.saturating_sub(avail) as usize;
+    let mut out = vec![];
+    for (i, l) in lines.iter().enumerate() {
+        let shown: &str = if i == cur_row && hscroll > 0 {
+            let off = l.char_indices().nth(hscroll).map_or(l.len(), |(b, _)| b);
+            &l[off..]
+        } else {
+            l
+        };
+        let mut spans = vec![Span::styled(if i == 0 { "❯ " } else { "  " }, Style::new().fg(t.accent).add_modifier(Modifier::BOLD))];
+        spans.extend(highlight(shown, i == 0, t));
+        if i == lines.len() - 1 {
+            if let Some(sug) = ed.suggestion(&app.history) {
+                spans.push(Span::styled(sug, Style::new().fg(t.dim)));
+            }
+        }
+        out.push(Line::from(spans));
+    }
+    if ed.buf.is_empty() {
+        out[0].push_span(Span::styled("escribe un comando…  (↑ historial · Tab completa · ^Space p paleta)", Style::new().fg(t.dim)));
+    }
+    let skip = (cur_row + 1).saturating_sub(inner.height as usize);
+    f.render_widget(Paragraph::new(out.into_iter().skip(skip).collect::<Vec<_>>()), inner);
+    if app.mode == Mode::Normal && app.block_sel.is_none() {
+        f.set_cursor_position(Position::new(
+            inner.x + prompt_w + cur_col - hscroll as u16,
+            inner.y + (cur_row - skip) as u16,
+        ));
+    }
+
+    // Opciones de autocompletado, encima de la caja.
+    if !ed.candidates.is_empty() {
+        let shown: Vec<&String> = ed.candidates.iter().take(8).collect();
+        let w = (shown.iter().map(|c| c.chars().count()).max().unwrap_or(0) as u16 + 4).min(r.width);
+        let hh = shown.len() as u16 + 2;
+        let pr = Rect::new(r.x + 2, r.y.saturating_sub(hh), w, hh);
+        f.render_widget(Clear, pr);
+        let more = ed.candidates.len().saturating_sub(shown.len());
+        let pb = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(t.accent))
+            .style(Style::new().bg(t.bar_bg))
+            .title_bottom(Span::styled(if more > 0 { format!(" +{more} ") } else { String::new() }, Style::new().fg(t.dim)));
+        let pi = pb.inner(pr);
+        f.render_widget(pb, pr);
+        f.render_widget(
+            Paragraph::new(shown.iter().map(|c| Line::styled(format!(" {c}"), Style::new().fg(t.fg))).collect::<Vec<_>>()),
+            pi,
+        );
+    }
 }
 
 /// Devuelve la zona del botón «+ nuevo agente».
@@ -270,7 +536,9 @@ fn welcome(f: &mut Frame, area: Rect, t: &Theme) {
 }
 
 fn status_bar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
+    let editor = app.sessions.get(app.focus).is_some_and(|s| s.editor_active());
     let (mode, col) = match app.mode {
+        Mode::Normal if app.block_sel.is_some() => ("BLOQUES", t.accent),
         Mode::Prefix => ("PREFIJO", t.working),
         Mode::Palette => ("PALETA", t.accent),
         Mode::Broadcast => ("BROADCAST", t.waiting),
@@ -301,6 +569,14 @@ fn status_bar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
         }
     } else if app.grid && app.git.is_none() {
         for (k, l) in [("←→↑↓", "mover"), ("Enter", "abrir"), ("^Space", "comandos")] {
+            spans.extend(hint(k, l));
+        }
+    } else if app.block_sel.is_some() {
+        for (k, l) in [("↑↓", "mover"), ("c", "copiar"), ("o", "salida"), ("r", "reutilizar"), ("Esc", "volver")] {
+            spans.extend(hint(k, l));
+        }
+    } else if editor && app.git.is_none() {
+        for (k, l) in [("^Space", "comandos"), ("Ctrl+↑", "bloques"), ("p", "paleta"), ("r", "git"), ("s", "panel")] {
             spans.extend(hint(k, l));
         }
     } else if app.git.is_none() {

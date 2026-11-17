@@ -116,6 +116,8 @@ Ejemplo completo:
 theme = "tokyo-night"   # tokyo-night | catppuccin | dracula | gruvbox | nord | one-dark | rose-pine | light
 transparent = false     # true: respeta el fondo de tu terminal (acrílico/imagen)
 scrollback = 2000       # líneas de historial por sesión (más líneas = más RAM)
+blocks = true           # bloques + editor estilo Warp en los shells (integración automática)
+sidebar = false         # barra lateral de agentes al arrancar (Ctrl+Space s la alterna)
 bell = true             # pitido cuando un agente en segundo plano termina o se bloquea
 
 [colors]                # opcional: sobrescribe colores del tema con "#rrggbb"
@@ -202,6 +204,8 @@ cargo uninstall kp
 | `error calling dlltool 'dlltool.exe': program not found` o `dlltool ... CreateProcess` | Toolchain GNU sin binutils completos: instala WinLibs (paso 2A) y reabre la terminal. `as --version` debe funcionar. |
 | `'codex' no está en el PATH` al lanzar un agente | El agente no está instalado o su carpeta no está en el PATH (`npm i -g @openai/codex`, etc.). kp resuelve `.exe`/`.cmd` como cmd.exe. |
 | Ctrl+Space no hace nada | Otra aplicación (cambio de idioma o IME del sistema, atajos de tu terminal) captura la combinación. Libérala ahí; el prefijo se define en `src/keys.rs` (`is_prefix`). |
+| Un shell no muestra bloques ni editor | Solo PowerShell, pwsh, cmd y bash tienen integración automática. Otros shells funcionan como terminal clásica. Si tu perfil redefine `prompt` de forma diferida, revisa que se ejecute antes del hook de kp. |
+| `c`/`o` en modo bloques no copia | El portapapeles va por OSC 52: Windows Terminal y WezTerm lo soportan; otras terminales pueden bloquearlo. |
 | kp se ve sin colores | Tienes definida la variable `NO_COLOR` (kp la respeta). Bórrala en ese entorno: `Remove-Item Env:NO_COLOR` o `unset NO_COLOR`. |
 | No puedo seleccionar texto con el ratón | kp captura el ratón para clics y rueda. En Windows Terminal, mantén **Shift** al arrastrar para seleccionar. |
 | Un agente aparece `idle` cuando está esperando una respuesta | Su diálogo no coincide con los patrones de «blocked». Añade el texto que muestra a `waiting_patterns` en la config (si defines la lista reemplaza a la de fábrica, que está en `src/config.rs`: cópiala y amplíala). |

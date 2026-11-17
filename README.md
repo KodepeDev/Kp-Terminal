@@ -47,6 +47,23 @@ Prefijo **Ctrl+Space**, y después:
 
 `Shift+Enter` envía una nueva línea (Meta+Enter) a Claude Code y Codex.
 
+## Bloques y editor (estilo Warp)
+
+En los shells (PowerShell, pwsh, cmd, bash) kp activa sola la **integración de shell**: el prompt emite marcas
+OSC 133 y kp agrupa cada comando con su salida en un **bloque**:
+
+- Franja lateral de color (verde ✔ / rojo ✘ / spinner mientras corre) y cabecera con código de salida y duración.
+- **Editor fijo abajo**: multilínea (`Shift+Enter`), historial con `↑` filtrado por lo que llevas escrito,
+  **sugerencia fantasma** desde el historial (`→` o `End` la acepta), `Tab` completa rutas, resaltado de sintaxis,
+  `Ctrl+←/→` por palabras, `Ctrl+W/U/K` borrar, `Esc` limpiar. Muestra carpeta y rama git.
+- Mientras un comando corre (o una app usa la pantalla completa: vim, less…) las teclas van directo al programa.
+- `Ctrl+↑` (o clic en un bloque) entra en **modo bloques**: `↑/↓` moverse, `c` copiar comando+salida,
+  `o` copiar solo la salida (al portapapeles vía OSC 52), `r` reutilizar el comando, `Esc` volver.
+- El historial se guarda en la misma carpeta que la config (`history`), sin duplicados.
+
+Las **pestañas** de arriba muestran cada sesión con su estado (clic para cambiar, `+` para lanzar). La barra
+lateral de agentes es opcional: `Ctrl+Space s` o `sidebar = true`.
+
 ## Revisar código (panel git)
 
 `Ctrl+Space r` abre un panel estilo cliente git sobre la carpeta de la sesión enfocada. Si cambias de sesión,
@@ -80,6 +97,8 @@ Cualquier color se puede sobrescribir con `"#rrggbb"`:
 
 ```toml
 theme = "catppuccin"
+blocks = true        # bloques + editor estilo Warp en los shells
+sidebar = false      # barra lateral de agentes visible al arrancar
 transparent = false  # true: usa el fondo de tu terminal (acrílico, imagen) en vez del del tema
 
 [colors]

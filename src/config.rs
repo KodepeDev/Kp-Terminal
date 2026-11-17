@@ -33,6 +33,10 @@ pub struct Config {
     pub colors: HashMap<String, String>,
     /// Usa el fondo de tu terminal (acrílico, imagen) en vez del fondo del tema.
     pub transparent: bool,
+    /// Bloques y editor estilo Warp en los shells (integración de shell automática).
+    pub blocks: bool,
+    /// Barra lateral de agentes visible al arrancar (las pestañas siempre están).
+    pub sidebar: bool,
 }
 
 impl Default for Config {
@@ -63,6 +67,8 @@ impl Default for Config {
             theme: THEMES[0].0.into(),
             colors: HashMap::new(),
             transparent: false,
+            blocks: true,
+            sidebar: false,
         }
     }
 }
