@@ -16,6 +16,9 @@ kp                # abre kp en la carpeta actual
 kp C:\mi\proyecto # o en otra
 ```
 
+Guía completa paso a paso (requisitos, Windows/Linux/macOS, configuración, uso en tus proyectos,
+problemas frecuentes): **[docs/INSTALACION.md](docs/INSTALACION.md)**.
+
 En Windows se usa el toolchain `stable-x86_64-pc-windows-gnu` y MinGW-w64 (WinLibs) en el PATH: `dlltool` necesita `as`.
 
 ## Uso
