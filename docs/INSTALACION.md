@@ -115,6 +115,9 @@ Ejemplo completo:
 ```toml
 theme = "tokyo-night"   # tokyo-night | catppuccin | dracula | gruvbox | nord | one-dark | rose-pine | light
 transparent = false     # true: respeta el fondo de tu terminal (acrílico/imagen)
+wallpaper = 'C:\Users\yo\Pictures\fondo.jpg'   # opcional: imagen PNG/JPEG detrás de la terminal
+wallpaper_opacity = 0.22                        # 0.0-1.0
+animations = true       # false: movimiento reducido
 scrollback = 2000       # líneas de historial por sesión (más líneas = más RAM)
 blocks = true           # bloques + editor estilo Warp en los shells (integración automática)
 sidebar = false         # barra lateral de agentes al arrancar (Ctrl+Space s la alterna)
@@ -207,6 +210,7 @@ cargo uninstall kp
 | Un shell no muestra bloques ni editor | Solo PowerShell, pwsh, cmd y bash tienen integración automática. Otros shells funcionan como terminal clásica. Si tu perfil redefine `prompt` de forma diferida, revisa que se ejecute antes del hook de kp. |
 | `c`/`o` en modo bloques no copia | El portapapeles va por OSC 52: Windows Terminal y WezTerm lo soportan; otras terminales pueden bloquearlo. |
 | kp se ve sin colores | Tienes definida la variable `NO_COLOR` (kp la respeta). Bórrala en ese entorno: `Remove-Item Env:NO_COLOR` o `unset NO_COLOR`. |
-| No puedo seleccionar texto con el ratón | kp captura el ratón para clics y rueda. En Windows Terminal, mantén **Shift** al arrastrar para seleccionar. |
+| No puedo seleccionar texto con el ratón | kp captura el ratón para clics y rueda. Pulsa `Ctrl+Space m` para liberarlo (otra vez para recuperarlo), o en Windows Terminal mantén **Shift** al arrastrar. |
+| El fondo de pantalla no aparece | Abre `Ctrl+Space l` (registro): ahí queda el error de carga. Solo PNG y JPEG; la terminal debe tener color real. |
 | Un agente aparece `idle` cuando está esperando una respuesta | Su diálogo no coincide con los patrones de «blocked». Añade el texto que muestra a `waiting_patterns` en la config (si defines la lista reemplaza a la de fábrica, que está en `src/config.rs`: cópiala y amplíala). |
 | Push desde el panel falla pidiendo credenciales | kp ejecuta git sin terminal interactiva. Configura un gestor de credenciales o SSH y haz un `git push` manual una vez. |

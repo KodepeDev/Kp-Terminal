@@ -48,8 +48,28 @@ fn short_path(p: &Path) -> String {
     }
 }
 
+/// Ancho en celdas de terminal (los emoji y CJK ocupan 2).
+fn cw(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
+
+/// Recorta a `n` celdas sin partir grafemas, con «…» si sobra.
 fn truncate(s: &str, n: usize) -> String {
-    if s.chars().count() <= n { s.to_string() } else { s.chars().take(n.saturating_sub(1)).collect::<String>() + "…" }
+    use unicode_segmentation::UnicodeSegmentation;
+    if cw(s) <= n {
+        return s.to_string();
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for g in s.graphemes(true) {
+        let w = cw(g);
+        if used + w + 1 > n {
+            break;
+        }
+        used += w;
+        out.push_str(g);
+    }
+    out + "…"
 }
 
 /// Copia la pantalla emulada al buffer, traduciendo sus colores al entorno visual del tema.
@@ -85,7 +105,8 @@ fn draw_screen(buf: &mut Buffer, area: Rect, screen: &vt100::Screen, top: u16, t
 pub fn draw(f: &mut Frame, app: &mut App) {
     // Al recorrer temas en la paleta se previsualizan en vivo.
     let t = app.preview_theme().unwrap_or(app.theme);
-    let frame = (app.started.elapsed().as_millis() / 100) as usize;
+    // Movimiento reducido: sin animación, el spinner queda fijo.
+    let frame = if app.cfg.animations { (app.started.elapsed().as_millis() / 100) as usize } else { 0 };
     f.render_widget(Block::new().style(Style::new().bg(t.bg).fg(t.fg)), f.area());
 
     let [side, right] = Layout::horizontal([Constraint::Length(app.sidebar_w()), Constraint::Min(1)]).areas(f.area());
@@ -107,7 +128,12 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         welcome(f, main, &t);
     }
     status_bar(f, bar, app, &t);
+    // Fondo de pantalla: solo en el área de contenido y en celdas con el fondo del tema, antes de los overlays.
+    if let Some(w) = app.wallpaper.as_mut() {
+        w.paint(f.buffer_mut(), main, t.bg, app.wall_opacity);
+    }
     match app.mode {
+        Mode::Log => log_view(f, main, app, &t),
         Mode::Palette => palette(f, main, app, &t),
         Mode::Prefix => which_key(f, main, &t),
         _ => {}
@@ -126,14 +152,14 @@ fn tabs(f: &mut Frame, area: Rect, app: &App, t: &Theme, frame: usize) -> (Vec<(
             elapsed(s.since.elapsed())
         )
     });
-    let info_w = info.as_ref().map_or(0, |i| i.chars().count() as u16);
+    let info_w = info.as_ref().map_or(0, |i| cw(i) as u16);
     let room = area.width.saturating_sub(if info_w < area.width / 2 { info_w } else { 0 });
     let mut hits = vec![];
     let mut x = area.x;
     for (i, s) in app.sessions.iter().enumerate() {
         let (ic, col) = icon(s, t, frame);
         let label = format!(" {ic} {} {} ", i + 1, truncate(&s.name, 16));
-        let w = label.chars().count() as u16 + 1;
+        let w = cw(&label) as u16 + 1;
         if x + w + 4 > area.x + room {
             break;
         }
@@ -227,7 +253,7 @@ fn session_view(f: &mut Frame, area: Rect, app: &App, t: &Theme, frame: usize) -
                 (false, Some(code), None) => format!(" ✘ {code} "),
                 _ => String::new(),
             };
-            let w = badge.chars().count() as u16;
+            let w = cw(&badge) as u16;
             if w > 0 && w < grid.width {
                 f.render_widget(
                     Paragraph::new(badge).style(Style::new().fg(col).bg(if selected { t.sel_bg } else { t.bar_bg }).add_modifier(Modifier::BOLD)),
@@ -262,7 +288,7 @@ fn fmt_dur(d: Duration) -> String {
 fn scroll_tag(f: &mut Frame, area: Rect, s: &Session, t: &Theme) {
     if s.scroll > 0 {
         let tag = format!(" ↑ historial {} · cualquier tecla vuelve ", s.scroll);
-        let w = (tag.chars().count() as u16).min(area.width);
+        let w = (cw(&tag) as u16).min(area.width);
         f.render_widget(
             Paragraph::new(tag).style(Style::new().bg(t.accent).fg(t.on_accent).add_modifier(Modifier::BOLD)),
             Rect::new(area.right() - w, area.y, w, 1),
@@ -327,11 +353,14 @@ fn editor_box(f: &mut Frame, area: Rect, grid: Rect, app: &App, s: &Session, t: 
     let r = Rect::new(area.x, area.bottom() - h, area.width, h);
     f.render_widget(Clear, r);
     let title = format!(" {}{} ", short_path(&s.cwd), s.branch.as_ref().map_or(String::new(), |b| format!("  ⎇ {b}")));
-    let hint = if app.block_sel.is_some() {
-        " ↑↓ bloques · c copiar · o salida · r reutilizar · Esc volver "
+    // Ayuda adaptable: la versión más larga que quepa junto al título (en terminales estrechas, ninguna).
+    let hints: &[&str] = if app.block_sel.is_some() {
+        &[" ↑↓ bloques · c copiar · o salida · r reutilizar · Esc volver ", " c copiar · r reutilizar · Esc ", ""]
     } else {
-        " Enter ejecutar · ⇧Enter línea · ↑ historial · → sugerencia · Tab completar · Ctrl+↑ bloques "
+        &[" Enter ejecutar · ⇧Enter línea · ↑ historial · → sugerencia · Tab completar · Ctrl+↑ bloques ", " Tab completar · Ctrl+↑ bloques ", ""]
     };
+    let room = (r.width as usize).saturating_sub(4);
+    let hint = *hints.iter().find(|h| cw(h) <= room).unwrap_or(&"");
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(if active { t.accent } else { t.dim }))
@@ -360,7 +389,7 @@ fn editor_box(f: &mut Frame, area: Rect, grid: Rect, app: &App, s: &Session, t: 
     // Texto con resaltado; desplazamiento horizontal si el cursor se sale.
     let before = &ed.buf[..ed.cur];
     let cur_row = before.matches('\n').count();
-    let cur_col = before.rsplit('\n').next().unwrap_or("").chars().count() as u16;
+    let cur_col = cw(before.rsplit('\n').next().unwrap_or("")) as u16;
     let prompt_w = 2u16;
     let avail = inner.width.saturating_sub(prompt_w + 1);
     let hscroll = cur_col.saturating_sub(avail) as usize;
@@ -396,7 +425,7 @@ fn editor_box(f: &mut Frame, area: Rect, grid: Rect, app: &App, s: &Session, t: 
     // Opciones de autocompletado, encima de la caja.
     if !ed.candidates.is_empty() {
         let shown: Vec<&String> = ed.candidates.iter().take(8).collect();
-        let w = (shown.iter().map(|c| c.chars().count()).max().unwrap_or(0) as u16 + 4).min(r.width);
+        let w = (shown.iter().map(|c| cw(c)).max().unwrap_or(0) as u16 + 4).min(r.width);
         let hh = shown.len() as u16 + 2;
         let pr = Rect::new(r.x + 2, r.y.saturating_sub(hh), w, hh);
         f.render_widget(Clear, pr);
@@ -542,6 +571,8 @@ fn status_bar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
         Mode::Prefix => ("PREFIJO", t.working),
         Mode::Palette => ("PALETA", t.accent),
         Mode::Broadcast => ("BROADCAST", t.waiting),
+        Mode::Wallpaper => ("FONDO", t.accent),
+        Mode::Log => ("REGISTRO", t.accent),
         Mode::Normal if app.git.is_some() => ("GIT", t.done),
         Mode::Normal if app.grid => ("GRID", t.accent),
         Mode::Normal => ("KP", t.accent),
@@ -553,7 +584,10 @@ fn status_bar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
     let hint = |k: &str, l: &str| {
         [Span::styled(k.to_string(), Style::new().fg(t.accent).add_modifier(Modifier::BOLD)), Span::styled(format!(" {l}  "), Style::new().fg(t.dim))]
     };
-    if app.mode == Mode::Broadcast {
+    if app.mode == Mode::Wallpaper {
+        spans.push(Span::styled("imagen PNG/JPEG (vacío = quitar)  ", Style::new().fg(t.dim)));
+        spans.push(Span::styled(format!("{}█", app.input), Style::new().fg(t.fg)));
+    } else if app.mode == Mode::Broadcast {
         let n = app.sessions.iter().filter(|s| s.agent && s.status != Status::Exited).count();
         spans.push(Span::styled(format!("→ {n} agentes  "), Style::new().fg(t.waiting)));
         spans.push(Span::styled(format!("{}█", app.input), Style::new().fg(t.fg)));
@@ -586,9 +620,20 @@ fn status_bar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
     }
     f.render_widget(Paragraph::new(Line::from(spans)).style(Style::new().bg(t.bar_bg)), area);
 
+    if !app.mouse {
+        // Sin captura de ratón: recordar cómo recuperarla (estado visible, no solo un aviso).
+        let tag = " ratón libre · ^Space m ";
+        let w = cw(tag) as u16;
+        if w < area.width / 3 {
+            f.render_widget(
+                Paragraph::new(tag).style(Style::new().bg(t.working).fg(t.on_accent).add_modifier(Modifier::BOLD)),
+                Rect::new(area.right().saturating_sub(w + 6), area.y, w, 1),
+            );
+        }
+    }
     if !app.sessions.is_empty() {
         let right = format!(" {}/{} ", app.focus + 1, app.sessions.len());
-        let w = right.chars().count() as u16;
+        let w = cw(&right) as u16;
         if w < area.width / 4 {
             f.render_widget(
                 Paragraph::new(right).style(Style::new().bg(t.sel_bg).fg(t.fg)),
@@ -600,7 +645,7 @@ fn status_bar(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
 
 /// Popup con lo que hace cada tecla tras el prefijo (estilo which-key).
 fn which_key(f: &mut Frame, area: Rect, t: &Theme) {
-    const KEYS: [(&str, &str); 12] = [
+    const KEYS: [(&str, &str); 14] = [
         ("p", "paleta"),
         ("n", "shell nuevo"),
         ("r", "revisar git"),
@@ -612,9 +657,11 @@ fn which_key(f: &mut Frame, area: Rect, t: &Theme) {
         ("u/d", "scroll historial"),
         ("w", "cerrar sesión"),
         ("q", "salir"),
+        ("m", "ratón on/off"),
+        ("l", "registro avisos"),
         ("␣", "enviar Ctrl+Space"),
     ];
-    let (w, h) = (52u16.min(area.width), 8u16.min(area.height));
+    let (w, h) = (52u16.min(area.width), 9u16.min(area.height));
     let r = Rect::new(area.right().saturating_sub(w + 1), area.bottom().saturating_sub(h + 1), w, h);
     f.render_widget(Clear, r);
     let block = Block::bordered()
@@ -727,5 +774,36 @@ fn palette(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
     if items.is_empty() {
         lines.push(Line::styled("   sin resultados", Style::new().fg(t.dim)));
     }
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Registro de mensajes y avisos (los avisos flotantes caducan; aquí quedan).
+fn log_view(f: &mut Frame, area: Rect, app: &App, t: &Theme) {
+    let w = area.width.saturating_sub(4).min(90);
+    let h = area.height.saturating_sub(2).min(20);
+    let r = Rect::new(area.x + (area.width - w) / 2, area.y + 1, w, h);
+    f.render_widget(Clear, r);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(t.accent))
+        .style(Style::new().bg(t.bar_bg))
+        .title(Span::styled(" ☰ registro ", Style::new().fg(t.accent).add_modifier(Modifier::BOLD)))
+        .title_bottom(Span::styled(" cualquier tecla cierra ", Style::new().fg(t.dim)));
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    let lines: Vec<Line> = if app.log.is_empty() {
+        vec![Line::styled(" sin mensajes todavía", Style::new().fg(t.dim))]
+    } else {
+        app.log
+            .iter()
+            .rev()
+            .take(inner.height as usize)
+            .map(|(at, text)| {
+                let ago = format!(" hace {:>6} ", elapsed(at.elapsed()));
+                let room = (inner.width as usize).saturating_sub(cw(&ago) + 1);
+                Line::from(vec![Span::styled(ago, Style::new().fg(t.dim)), Span::styled(truncate(text, room), Style::new().fg(t.fg))])
+            })
+            .collect()
+    };
     f.render_widget(Paragraph::new(lines), inner);
 }

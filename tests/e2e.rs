@@ -17,12 +17,19 @@ struct Kp {
 
 impl Kp {
     fn start(dir: &std::path::Path) -> Kp {
-        let pty = native_pty_system().openpty(PtySize { rows: 40, cols: 140, pixel_width: 0, pixel_height: 0 }).unwrap();
+        Kp::launch(dir, 40, 140, "")
+    }
+
+    /// kp en un PTY de `rows`x`cols` con su propia config (aislada de la del usuario y de otros tests).
+    fn launch(dir: &std::path::Path, rows: u16, cols: u16, config: &str) -> Kp {
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let pty = native_pty_system().openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }).unwrap();
         let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_kp"));
         cmd.arg(dir);
-        // Config vacía en una carpeta propia para no depender de la del usuario.
-        let cfgdir = std::env::temp_dir().join("kp-e2e-cfg");
-        std::fs::create_dir_all(&cfgdir).unwrap();
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let cfgdir = std::env::temp_dir().join(format!("kp-e2e-cfg-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(cfgdir.join("kodepeter")).unwrap();
+        std::fs::write(cfgdir.join("kodepeter").join("config.toml"), config).unwrap();
         cmd.env("APPDATA", &cfgdir);
         cmd.env("XDG_CONFIG_HOME", &cfgdir);
         cmd.env_remove("NO_COLOR"); // la sesión que ejecuta los tests puede tenerla definida
@@ -30,7 +37,7 @@ impl Kp {
         drop(pty.slave);
         let mut reader = pty.master.try_clone_reader().unwrap();
         let writer = Arc::new(Mutex::new(pty.master.take_writer().unwrap()));
-        let parser = Arc::new(Mutex::new(vt100::Parser::new(40.try_into().unwrap(), 140.try_into().unwrap(), 0)));
+        let parser = Arc::new(Mutex::new(vt100::Parser::new(rows.try_into().unwrap(), cols.try_into().unwrap(), 0)));
         let (p, w) = (parser.clone(), writer.clone());
         std::thread::spawn(move || {
             let _master = pty.master; // mantener vivo el PTY
@@ -309,3 +316,57 @@ fn snapshots() {
     kp.quit();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Fondo de pantalla desde la config y cambiado en vivo desde la paleta; disposición en 80x24.
+#[test]
+fn wallpaper_and_narrow_layout() {
+    let dir = std::env::temp_dir().join(format!("kp-e2e-wall-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // Degradado diagonal (PNG) y otra imagen para el cambio en vivo.
+    let img = image::RgbImage::from_fn(320, 180, |x, y| image::Rgb([(x * 255 / 319) as u8, (y * 255 / 179) as u8, 160]));
+    img.save(dir.join("fondo.png")).unwrap();
+    image::RgbImage::from_pixel(8, 8, image::Rgb([0, 200, 120])).save(dir.join("verde.png")).unwrap();
+    let cfg = format!("wallpaper = '{}'\nwallpaper_opacity = 0.35\n", dir.join("fondo.png").display());
+
+    let kp = Kp::launch(&dir, 24, 80, &cfg);
+    kp.wait_for(20, "pestaña", |s| s.contains("1 shell"));
+    // El fondo cambia solo el color de fondo de las celdas: muchas tonalidades distintas en el contenido.
+    let t0 = Instant::now();
+    let tones = || {
+        let p = kp.parser.lock().unwrap();
+        let mut seen = std::collections::HashSet::new();
+        for r in 2..18 {
+            for c in 5..75 {
+                if let Some(vt100::Color::Rgb(a, b, d)) = p.screen().cell(r, c).map(|c| c.bgcolor()) {
+                    seen.insert((a, b, d));
+                }
+            }
+        }
+        seen.len()
+    };
+    while tones() < 20 && t0.elapsed() < Duration::from_secs(20) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert!(tones() >= 20, "fondo sin pintar ({} tonos)", tones());
+    assert!(!kp.screen().contains('▀'), "el fondo no debe sustituir caracteres");
+    kp.wait_for(30, "editor en 80x24", |s| s.contains("escribe un comando"));
+    snapshot_html(&kp, "6-fondo-80x24");
+
+    kp.send(PREFIX);
+    kp.send(b"p");
+    kp.send(b"fondo elegir");
+    kp.wait_for(20, "acción de fondo en la paleta", |s| s.contains("fondo de pantalla: elegir"));
+    kp.send(b"\r");
+    kp.wait_for(20, "entrada de ruta", |s| s.contains("FONDO"));
+    // Borra la ruta actual (prellenada) y escribe la nueva, relativa al proyecto.
+    for _ in 0..200 {
+        kp.writer.lock().unwrap().write_all(b"\x7f").unwrap();
+    }
+    kp.send(b"verde.png");
+    kp.send(b"\r");
+    kp.wait_for(20, "fondo cambiado", |s| s.contains("fondo:") && s.contains("verde.png"));
+    kp.quit();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+

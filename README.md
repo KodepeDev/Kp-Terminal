@@ -38,6 +38,8 @@ Prefijo **Ctrl+Space**, y después:
 | `r` | **revisar código**: panel git de la sesión (su worktree si es un agente aislado) |
 | `n` | shell nuevo |
 | `s` | mostrar/ocultar la barra lateral (más espacio para el agente) |
+| `m` | liberar/recuperar el ratón (liberado: seleccionas texto con tu terminal) |
+| `l` | registro de avisos y mensajes recientes |
 | `g` | vista **grid**: todos los agentes en mosaico (flechas/hjkl, Enter abre) |
 | `b` | **broadcast**: el mismo prompt a todos los agentes |
 | `j`/`k`, `1`-`9` | cambiar de sesión (también con clic en la barra lateral) |
@@ -86,6 +88,24 @@ el panel la sigue, así que puedes revisar agente por agente, cada uno en su wor
 
 `j`/`k` o clic para elegir archivo; `Espacio`/`b` o la rueda para desplazar el diff.
 
+## Fondo de pantalla
+
+kp pone una imagen PNG o JPEG **detrás de la terminal**: tiñe el color de fondo de cada celda (en color real),
+mezclado con el fondo del tema para que el texto siga legible. Nunca cambia caracteres, así que copiar texto y
+los lectores de pantalla funcionan igual. No necesita protocolos de imagen. Solo afecta a las celdas con el fondo
+por defecto: las apps que pintan su propio fondo se respetan, y pestañas, barras y editor quedan sólidos.
+
+- En vivo: paleta → `fondo de pantalla: elegir imagen…` (ruta absoluta o relativa al proyecto; vacío = quitar),
+  `más visible` / `menos visible`.
+- Fijo en la config:
+
+```toml
+wallpaper = 'C:\Users\yo\Pictures\montaña.jpg'
+wallpaper_opacity = 0.22   # 0.0-1.0: cuánto se ve la imagen (bajo = texto más legible)
+```
+
+La imagen se decodifica en segundo plano y se guarda reducida (≤640×360): una foto 4K no dispara la RAM.
+
 ## Temas
 
 Cada tema es un **entorno visual completo**: interfaz, fondo, texto y la paleta ANSI de 16 colores, que se
@@ -100,6 +120,7 @@ theme = "catppuccin"
 blocks = true        # bloques + editor estilo Warp en los shells
 sidebar = false      # barra lateral de agentes visible al arrancar
 transparent = false  # true: usa el fondo de tu terminal (acrílico, imagen) en vez del del tema
+animations = true    # false: sin spinners (movimiento reducido)
 
 [colors]
 accent = "#ff79c6"   # acento, botones y selección

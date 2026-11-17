@@ -37,6 +37,12 @@ pub struct Config {
     pub blocks: bool,
     /// Barra lateral de agentes visible al arrancar (las pestañas siempre están).
     pub sidebar: bool,
+    /// Imagen PNG/JPEG de fondo de pantalla (ruta).
+    pub wallpaper: Option<String>,
+    /// Cuánto se ve la imagen sobre el fondo del tema (0.0-1.0; bajo = texto más legible).
+    pub wallpaper_opacity: f32,
+    /// Spinners y animaciones (false = movimiento reducido).
+    pub animations: bool,
 }
 
 impl Default for Config {
@@ -69,6 +75,9 @@ impl Default for Config {
             transparent: false,
             blocks: true,
             sidebar: false,
+            wallpaper: None,
+            wallpaper_opacity: 0.22,
+            animations: true,
         }
     }
 }
@@ -240,6 +249,7 @@ pub fn load() -> (Config, Option<String>) {
             Ok(mut c) => {
                 c.waiting_patterns.iter_mut().for_each(|w| *w = w.to_lowercase());
                 c.scrollback = c.scrollback.min(100_000);
+                c.wallpaper_opacity = c.wallpaper_opacity.clamp(0.0, 1.0);
                 if c.presets.is_empty() {
                     c.presets = Config::default().presets;
                 }

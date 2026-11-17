@@ -6,6 +6,7 @@ mod keys;
 mod session;
 mod shell;
 mod ui;
+mod wallpaper;
 
 use config::{Config, THEMES, Theme};
 use ratatui::crossterm::event::{
@@ -27,6 +28,8 @@ pub enum Event {
     Ctl(Vec<String>, String, Sender<String>),
     /// Resultado de git pull/push en segundo plano.
     GitDone(String),
+    /// Imagen de fondo decodificada en segundo plano.
+    Wallpaper(Result<Box<wallpaper::Wallpaper>, String>),
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -35,6 +38,10 @@ pub enum Mode {
     Prefix,
     Palette,
     Broadcast,
+    /// Escribiendo la ruta de la imagen de fondo.
+    Wallpaper,
+    /// Registro de avisos y mensajes.
+    Log,
 }
 
 /// Aviso flotante (esquina superior derecha) cuando un agente termina o se bloquea.
@@ -64,6 +71,11 @@ pub enum Action {
     Quit,
     Git,
     Theme(usize),
+    Wallpaper,
+    WallpaperOff,
+    WallOpacity(i8),
+    Log,
+    Mouse,
 }
 
 pub struct App {
@@ -102,6 +114,12 @@ pub struct App {
     pub history: editor::History,
     /// Bloque seleccionado en la sesión enfocada (modo bloques).
     pub block_sel: Option<usize>,
+    pub wallpaper: Option<Box<wallpaper::Wallpaper>>,
+    pub wall_opacity: f32,
+    /// Captura de ratón activa (desactivarla permite seleccionar texto con la terminal).
+    pub mouse: bool,
+    /// Mensajes y avisos recientes (Ctrl+Space l).
+    pub log: Vec<(Instant, String)>,
 }
 
 /// Coincidencia difusa: posiciones de `s` donde aparecen, en orden, las letras de `q`.
@@ -149,7 +167,33 @@ impl App {
             last_clock: 0,
             history: editor::History::load(None),
             block_sel: None,
+            wallpaper: None,
+            wall_opacity: 0.22,
+            mouse: true,
+            log: vec![],
         }
+    }
+
+    /// Mensaje en la barra de estado que además queda en el registro.
+    pub fn note(&mut self, text: impl Into<String>) {
+        let text = text.into();
+        if !text.is_empty() {
+            self.log.push((Instant::now(), text.clone()));
+            if self.log.len() > 100 {
+                self.log.remove(0);
+            }
+        }
+        self.msg = text;
+    }
+
+    fn set_mouse(&mut self, on: bool) {
+        self.mouse = on;
+        let _ = if on {
+            execute!(std::io::stdout(), EnableMouseCapture)
+        } else {
+            execute!(std::io::stdout(), DisableMouseCapture)
+        };
+        self.note(if on { "ratón de kp activado" } else { "ratón liberado: selecciona texto con la terminal · Ctrl+Space m lo recupera" });
     }
 
     pub fn sidebar_w(&self) -> u16 {
@@ -233,7 +277,7 @@ impl App {
             return true;
         }
         self.confirm = Some(key);
-        self.msg = format!("Hay agentes trabajando: repite Ctrl+Space {key} para confirmar");
+        self.note(format!("Hay agentes trabajando: repite Ctrl+Space {key} para confirmar"));
         false
     }
 
@@ -250,7 +294,7 @@ impl App {
             }
             Err(e) => {
                 self.git = None;
-                self.msg = e;
+                self.note(e);
             }
         }
     }
@@ -289,6 +333,14 @@ impl App {
         for (i, (name, ..)) in THEMES.iter().enumerate() {
             v.push(("◐", format!("tema: {name}"), Action::Theme(i)));
         }
+        v.push(("▣", "fondo de pantalla: elegir imagen…".into(), Action::Wallpaper));
+        if self.wallpaper.is_some() {
+            v.push(("▣", "fondo de pantalla: más visible".into(), Action::WallOpacity(1)));
+            v.push(("▣", "fondo de pantalla: menos visible".into(), Action::WallOpacity(-1)));
+            v.push(("▣", "fondo de pantalla: quitar".into(), Action::WallpaperOff));
+        }
+        v.push(("☰", "registro de avisos y mensajes".into(), Action::Log));
+        v.push(("⌖", "ratón: activar/liberar (para seleccionar texto)".into(), Action::Mouse));
         let mut items: Vec<Item> = v
             .into_iter()
             .filter_map(|(icon, label, action)| fuzzy_pos(&self.input, &label).map(|hits| Item { icon, label, action, hits }))
@@ -320,7 +372,7 @@ impl App {
         match a {
             Action::Spawn(p, wt) => {
                 if let Err(e) = self.spawn(p, wt, None, true) {
-                    self.msg = e;
+                    self.note(e);
                 }
                 self.grid = false;
             }
@@ -333,14 +385,28 @@ impl App {
             Action::Theme(i) => match self.cfg.theme_named(THEMES[i].0) {
                 Ok(t) => {
                     self.theme = t;
-                    self.msg = format!("tema {} (fíjalo con theme = \"{}\" en la config)", THEMES[i].0, THEMES[i].0);
+                    self.note(format!("tema {} (fíjalo con theme = \"{}\" en la config)", THEMES[i].0, THEMES[i].0));
                 }
-                Err(e) => self.msg = e,
+                Err(e) => self.note(e),
             },
             Action::Broadcast => {
                 self.input.clear();
                 self.mode = Mode::Broadcast;
             }
+            Action::Wallpaper => {
+                self.input = self.wallpaper.as_ref().map_or(String::new(), |w| w.path.display().to_string());
+                self.mode = Mode::Wallpaper;
+            }
+            Action::WallpaperOff => {
+                self.wallpaper = None;
+                self.note("fondo de pantalla quitado");
+            }
+            Action::WallOpacity(d) => {
+                self.wall_opacity = (self.wall_opacity + d as f32 * 0.08).clamp(0.04, 1.0);
+                self.note(format!("fondo al {:.0} % (wallpaper_opacity = {:.2})", self.wall_opacity * 100.0, self.wall_opacity));
+            }
+            Action::Log => self.mode = Mode::Log,
+            Action::Mouse => self.set_mouse(!self.mouse),
             Action::Close => {
                 let risky = self.sessions.get(self.focus).is_some_and(|s| s.agent && s.status == Status::Working);
                 if self.confirmed('w', risky, pending) {
@@ -367,7 +433,8 @@ impl App {
                 self.mode = Mode::Normal;
                 self.prefix_key(k);
             }
-            Mode::Palette | Mode::Broadcast => self.line_key(k),
+            Mode::Palette | Mode::Broadcast | Mode::Wallpaper => self.line_key(k),
+            Mode::Log => self.mode = Mode::Normal,
             Mode::Normal if keys::is_prefix(&k) => self.mode = Mode::Prefix,
             Mode::Normal if self.git.is_some() => {
                 let req = self.git.as_mut().and_then(|g| g.key(k));
@@ -408,7 +475,7 @@ impl App {
         let Some(s) = self.sessions.get_mut(self.focus) else { return };
         let ids: Vec<usize> = (0..s.blocks.len()).filter(|&i| !s.blocks[i].cmd.is_empty()).collect();
         let Some(&last) = ids.last() else {
-            self.msg = "todavía no hay bloques en esta sesión".into();
+            self.note("todavía no hay bloques en esta sesión");
             return;
         };
         let pos = self.block_sel.and_then(|b| ids.iter().position(|&i| i == b));
@@ -434,7 +501,7 @@ impl App {
             K::Char(c @ ('c' | 'o')) => {
                 let text = s.block_text(i, c == 'c');
                 copy_to_clipboard(&text);
-                self.msg = format!("copiado al portapapeles ({} líneas)", text.lines().count());
+                self.note(format!("copiado al portapapeles ({} líneas)", text.lines().count()));
             }
             K::Char('r') => {
                 let cmd = s.blocks[i].cmd.clone();
@@ -467,6 +534,8 @@ impl App {
             K::Char('g') => self.run(Action::Grid),
             K::Char('r') => self.run(Action::Git),
             K::Char('s') => self.sidebar = !self.sidebar,
+            K::Char('m') => self.set_mouse(!self.mouse),
+            K::Char('l') => self.mode = Mode::Log,
             K::Char('b') => self.run(Action::Broadcast),
             K::Char('w') => self.run(Action::Close),
             K::Char('q') => self.run(Action::Quit),
@@ -526,6 +595,17 @@ impl App {
                     self.run(item.action.clone());
                 }
             }
+            K::Enter if self.mode == Mode::Wallpaper => {
+                self.mode = Mode::Normal;
+                let path = std::mem::take(&mut self.input);
+                let path = path.trim().trim_matches(['"', '\'']);
+                if path.is_empty() {
+                    self.run(Action::WallpaperOff);
+                } else {
+                    wallpaper::load_async(self.project.join(path), self.tx.clone());
+                    self.note("cargando fondo de pantalla…");
+                }
+            }
             K::Enter => {
                 self.mode = Mode::Normal;
                 let text = std::mem::take(&mut self.input);
@@ -534,7 +614,7 @@ impl App {
                     s.send_prompt(&text);
                     n += 1;
                 }
-                self.msg = format!("prompt enviado a {n} agentes");
+                self.note(format!("prompt enviado a {n} agentes"));
             }
             K::Char(c) if !keys::is_prefix(&k) => {
                 self.input.push(c);
@@ -672,7 +752,7 @@ impl App {
             Event::Input(CtEvent::Key(k)) => self.on_key(k),
             Event::Input(CtEvent::Mouse(m)) => self.on_mouse(m),
             Event::Input(CtEvent::Paste(text)) => match self.mode {
-                Mode::Palette | Mode::Broadcast => self.input.push_str(&text),
+                Mode::Palette | Mode::Broadcast | Mode::Wallpaper => self.input.push_str(&text),
                 _ if self.git.is_some() => self.git.as_mut().unwrap().paste(&text),
                 _ => {
                     if let Some(s) = self.cur() {
@@ -685,9 +765,15 @@ impl App {
                 }
             },
             Event::Input(_) => {}
+            Event::Wallpaper(Ok(w)) => {
+                let path = w.path.display().to_string();
+                self.wallpaper = Some(w);
+                self.note(format!("fondo: {path}  (fíjalo con wallpaper = '{path}' en la config)"));
+            }
+            Event::Wallpaper(Err(e)) => self.note(e),
             Event::GitDone(msg) => match self.git.as_mut() {
                 Some(g) => g.done(msg),
-                None => self.msg = msg,
+                None => self.note(msg),
             },
             Event::Ctl(args, body, reply) => {
                 let r = self.on_ctl(args, body);
@@ -723,7 +809,7 @@ impl App {
         let clock = self.started.elapsed().as_secs();
         let tick_clock = clock != self.last_clock;
         self.last_clock = clock;
-        let animating = self.sessions.iter().any(|s| s.status == Status::Working);
+        let animating = self.cfg.animations && self.sessions.iter().any(|s| s.status == Status::Working);
         changed || animating || tick_clock || n != self.toasts.len()
     }
 }
@@ -787,19 +873,29 @@ fn run(project: PathBuf) -> std::io::Result<()> {
 
     let mut term = ratatui::init();
     execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
+    // ratatui restaura raw mode y pantalla alterna al fallar; esto deshace también ratón y bracketed paste.
+    let restore = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
+        restore(info);
+    }));
     let mut app = App::new(cfg, project, env, tx);
     app.sidebar = app.cfg.sidebar;
+    app.wall_opacity = app.cfg.wallpaper_opacity;
+    if let Some(p) = app.cfg.wallpaper.clone() {
+        wallpaper::load_async(PathBuf::from(p), app.tx.clone());
+    }
     app.history = editor::History::load(Some(config::path().with_file_name("history")));
     app.resize(term.size()?.height.saturating_sub(2), term.size()?.width.saturating_sub(ui::SIDEBAR));
     if let Err(e) = app.spawn(app.shell_preset(), false, None, true) {
-        app.msg = e;
+        app.note(e);
     }
     match app.cfg.theme_named(&app.cfg.theme) {
         Ok(t) => app.theme = t,
-        Err(e) => app.msg = e,
+        Err(e) => app.note(e),
     }
     if let Some(e) = cfg_err {
-        app.msg = e;
+        app.note(e);
     }
 
     let result = (|| -> std::io::Result<()> {
