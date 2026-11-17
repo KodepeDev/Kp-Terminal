@@ -113,7 +113,8 @@ Ruta del archivo (no existe hasta que lo crees):
 Ejemplo completo:
 
 ```toml
-theme = "tokyo-night"   # tokyo-night | catppuccin | dracula | gruvbox | nord | light
+theme = "tokyo-night"   # tokyo-night | catppuccin | dracula | gruvbox | nord | one-dark | rose-pine | light
+transparent = false     # true: respeta el fondo de tu terminal (acrílico/imagen)
 scrollback = 2000       # líneas de historial por sesión (más líneas = más RAM)
 bell = true             # pitido cuando un agente en segundo plano termina o se bloquea
 
@@ -201,6 +202,7 @@ cargo uninstall kp
 | `error calling dlltool 'dlltool.exe': program not found` o `dlltool ... CreateProcess` | Toolchain GNU sin binutils completos: instala WinLibs (paso 2A) y reabre la terminal. `as --version` debe funcionar. |
 | `'codex' no está en el PATH` al lanzar un agente | El agente no está instalado o su carpeta no está en el PATH (`npm i -g @openai/codex`, etc.). kp resuelve `.exe`/`.cmd` como cmd.exe. |
 | Ctrl+Space no hace nada | Otra aplicación (cambio de idioma o IME del sistema, atajos de tu terminal) captura la combinación. Libérala ahí; el prefijo se define en `src/keys.rs` (`is_prefix`). |
+| kp se ve sin colores | Tienes definida la variable `NO_COLOR` (kp la respeta). Bórrala en ese entorno: `Remove-Item Env:NO_COLOR` o `unset NO_COLOR`. |
 | No puedo seleccionar texto con el ratón | kp captura el ratón para clics y rueda. En Windows Terminal, mantén **Shift** al arrastrar para seleccionar. |
 | Un agente aparece `idle` cuando está esperando una respuesta | Su diálogo no coincide con los patrones de «blocked». Añade el texto que muestra a `waiting_patterns` en la config (si defines la lista reemplaza a la de fábrica, que está en `src/config.rs`: cópiala y amplíala). |
 | Push desde el panel falla pidiendo credenciales | kp ejecuta git sin terminal interactiva. Configura un gestor de credenciales o SSH y haz un `git push` manual una vez. |

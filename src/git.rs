@@ -32,6 +32,26 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// Rama actual leyendo `.git/HEAD` (sin lanzar procesos; vale también para worktrees).
+pub fn branch(dir: &Path) -> Option<String> {
+    for p in dir.ancestors() {
+        let g = p.join(".git");
+        let gitdir = if g.is_dir() {
+            g
+        } else if g.is_file() {
+            // Worktree: `.git` es un archivo `gitdir: <ruta>`.
+            let s = std::fs::read_to_string(&g).ok()?;
+            p.join(s.trim().strip_prefix("gitdir:")?.trim())
+        } else {
+            continue;
+        };
+        let head = std::fs::read_to_string(gitdir.join("HEAD")).ok()?;
+        let head = head.trim();
+        return Some(head.strip_prefix("ref: refs/heads/").map_or_else(|| head.chars().take(7).collect(), String::from));
+    }
+    None
+}
+
 /// Crea un worktree hermano del repo en una rama nueva, para que varios agentes trabajen sin pisarse.
 pub fn worktree(dir: &Path, preset: &str) -> Result<PathBuf, String> {
     let root = PathBuf::from(git(dir, &["rev-parse", "--show-toplevel"])?.trim());
@@ -54,6 +74,25 @@ impl Entry {
     fn untracked(&self) -> bool {
         self.x == '?'
     }
+}
+
+/// Cabecera `## ...` de git status, resumida: `main ↑1 ↓2`, `main · sin commits`.
+pub fn branch_label(raw: &str) -> String {
+    if let Some(b) = raw.strip_prefix("No commits yet on ") {
+        return format!("{b} · sin commits");
+    }
+    let name = raw.split("...").next().unwrap_or(raw).split(' ').next().unwrap_or(raw);
+    let mut out = name.to_string();
+    if let Some(info) = raw.split_once('[').map(|(_, r)| r.trim_end_matches(']')) {
+        for part in info.split(", ") {
+            if let Some(n) = part.strip_prefix("ahead ") {
+                out += &format!(" ↑{n}");
+            } else if let Some(n) = part.strip_prefix("behind ") {
+                out += &format!(" ↓{n}");
+            }
+        }
+    }
+    out
 }
 
 /// Parsea `git status --porcelain=v1 -b -z`: (rama, entradas).
@@ -364,11 +403,18 @@ impl GitView {
 
         // Barra de botones.
         self.buttons.clear();
-        let head = format!(" ⎇ {} ", self.branch);
+        let head = format!(" ⎇ {} ", branch_label(&self.branch));
         let mut spans = vec![Span::styled(head.clone(), Style::new().fg(t.accent).add_modifier(Modifier::BOLD))];
         let mut x = bar.x + head.chars().count() as u16;
+        // Si no caben con texto, solo tecla + icono: nunca se esconden botones.
+        let full: usize = BUTTONS.iter().map(|(_, l, _)| l.chars().count() + 5).sum();
+        let compact = x as usize + full > bar.right() as usize;
         for (b, label, key) in BUTTONS {
-            let text = format!(" {key} {label} ");
+            let text = if compact {
+                format!(" {key} {} ", label.split(' ').next().unwrap_or(label))
+            } else {
+                format!(" {key} {label} ")
+            };
             let w = text.chars().count() as u16;
             if x + w > bar.right() {
                 break;
@@ -463,7 +509,17 @@ impl GitView {
                 ])
             }
             None if !self.msg.is_empty() => Line::styled(format!(" {}", self.msg), Style::new().fg(t.working)),
-            None => Line::styled(format!(" {}", self.dir.display()), Style::new().fg(t.dim)),
+            // Leyenda de teclas (los botones pueden estar en modo compacto) y la carpeta revisada.
+            None => {
+                let mut spans = vec![];
+                for (_, label, key) in BUTTONS {
+                    let name = label.split_once(' ').map_or(label, |(_, n)| n).to_lowercase();
+                    spans.push(Span::styled(format!(" {key}"), Style::new().fg(t.accent).add_modifier(Modifier::BOLD)));
+                    spans.push(Span::styled(format!(" {name} "), Style::new().fg(t.dim)));
+                }
+                spans.push(Span::styled(format!("  {}", self.dir.display()), Style::new().fg(t.dim)));
+                Line::from(spans)
+            }
         };
         f.render_widget(Paragraph::new(line).style(Style::new().bg(t.bar_bg)), foot);
     }
@@ -483,6 +539,10 @@ mod tests {
         assert_eq!(files[0], Entry { x: 'M', y: ' ', path: "src/a.rs".into() });
         assert_eq!(files[2].path, "new.rs");
         assert_eq!(files[3], Entry { x: '?', y: '?', path: "dir/c d.md".into() });
+        assert_eq!(branch_label(&branch), "main ↑1");
+        assert_eq!(branch_label("No commits yet on main"), "main · sin commits");
+        assert_eq!(branch_label("dev...origin/dev [ahead 2, behind 3]"), "dev ↑2 ↓3");
+        assert_eq!(branch_label("main"), "main");
     }
 
     /// Flujo completo sobre un repo temporal: ver cambio → stage → commit → descartar (con confirmación).
@@ -509,6 +569,10 @@ mod tests {
         v.key(KeyEvent::from(K::Enter));
         assert!(v.files.is_empty(), "{}", v.msg);
         assert!(git(&dir, &["log", "--oneline"]).unwrap().contains("primer commit"));
+        assert_eq!(branch(&dir).as_deref(), Some("main"));
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        assert_eq!(branch(&sub).as_deref(), Some("main"), "desde una subcarpeta");
 
         std::fs::write(dir.join("a.txt"), "cambiado\n").unwrap();
         v.refresh();

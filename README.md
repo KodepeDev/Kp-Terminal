@@ -5,7 +5,7 @@ Combina lo mejor de herdr (un PTY por agente, barra lateral con estado, API para
 con la UX de Warp (paleta de comandos, interfaz cuidada).
 
 - **Ligero:** binario de ~1 MB y ~10 MB de RAM con 2 sesiones (medido en Windows, release).
-- **Rápido:** render por eventos (0 % CPU en reposo); las ráfagas de salida se agrupan en un frame cada ~8 ms.
+- **Rápido:** render por eventos (en reposo, 1 repintado por segundo para los relojes); las ráfagas de salida se agrupan en un frame cada ~8 ms.
 - Corre dentro de cualquier terminal: Windows Terminal, Warp, WezTerm, VS Code…
 
 ## Instalar
@@ -23,9 +23,12 @@ En Windows se usa el toolchain `stable-x86_64-pc-windows-gnu` y MinGW-w64 (WinLi
 
 ## Uso
 
-Barra lateral: `● working`, `▲ blocked` (el agente espera tu decisión: permisos, y/n, diálogos),
-`✔` (terminó mientras no mirabas), `○ idle`, `✕ exited`. Cuando un agente en segundo plano termina o se
-bloquea, suena la campana del terminal.
+Barra lateral: spinner animado = `working`, `▲ blocked` (el agente espera tu decisión: permisos, y/n,
+diálogos), `✔` (terminó mientras no mirabas), `○ idle`, `✕ exited`, con el tiempo en ese estado y la rama git.
+Cuando un agente en segundo plano termina o se bloquea aparece un **aviso flotante** (clic para ir a él) y
+suena la campana del terminal. Cada sesión tiene una **cabecera** con estado, tarea, rama, carpeta y tiempo.
+
+Al pulsar `Ctrl+Space` aparece un **popup con todos los atajos**; no hace falta memorizarlos.
 
 Prefijo **Ctrl+Space**, y después:
 
@@ -34,6 +37,7 @@ Prefijo **Ctrl+Space**, y después:
 | `p` / `a` | paleta: lanzar agente, agente en **git worktree aislado**, saltar a sesión, acciones |
 | `r` | **revisar código**: panel git de la sesión (su worktree si es un agente aislado) |
 | `n` | shell nuevo |
+| `s` | mostrar/ocultar la barra lateral (más espacio para el agente) |
 | `g` | vista **grid**: todos los agentes en mosaico (flechas/hjkl, Enter abre) |
 | `b` | **broadcast**: el mismo prompt a todos los agentes |
 | `j`/`k`, `1`-`9` | cambiar de sesión (también con clic en la barra lateral) |
@@ -67,16 +71,20 @@ el panel la sigue, así que puedes revisar agente por agente, cada uno en su wor
 
 ## Temas
 
-Integrados: `tokyo-night` (por defecto), `catppuccin`, `dracula`, `gruvbox`, `nord`, `light`.
-Pruébalos en vivo desde la paleta (`tema: …`) y fija el elegido en la config. Cualquier color se puede
-sobrescribir con `"#rrggbb"`:
+Cada tema es un **entorno visual completo**: interfaz, fondo, texto y la paleta ANSI de 16 colores, que se
+aplica también a lo que muestran los agentes y shells dentro de las sesiones.
+
+Integrados: `tokyo-night` (por defecto), `catppuccin`, `dracula`, `gruvbox`, `nord`, `one-dark`, `rose-pine`,
+`light`. En la paleta, al recorrer `tema: …` se **previsualiza en vivo**; Enter lo aplica. Fíjalo en la config.
+Cualquier color se puede sobrescribir con `"#rrggbb"`:
 
 ```toml
 theme = "catppuccin"
+transparent = false  # true: usa el fondo de tu terminal (acrílico, imagen) en vez del del tema
 
 [colors]
 accent = "#ff79c6"   # acento, botones y selección
-# dim, sel_bg, bar_bg, working, waiting, done, exited, add, del, on_accent
+# bg, fg, dim, sel_bg, bar_bg, working, waiting, done, exited, add, del, on_accent, ansi0 … ansi15
 ```
 
 ## Orquestación entre agentes: `kp ctl`
@@ -130,6 +138,7 @@ cmd = "claude --dangerously-skip-permissions"
 ```sh
 cargo test                          # unitarios + PTY real + API ctl + e2e de la TUI manejada por teclas
 cargo test -- --ignored real_agent  # abre Claude Code real dentro de kp y verifica que lo detecta como blocked/idle
+cargo test -- --ignored snapshots   # vuelca cada vista con sus colores a target/kp-snapshots/*.html
 ```
 
 ## Fuera de alcance (por ahora)

@@ -35,6 +35,23 @@ pub enum Mode {
     Broadcast,
 }
 
+/// Aviso flotante (esquina superior derecha) cuando un agente termina o se bloquea.
+pub struct Toast {
+    pub text: String,
+    pub status: Status,
+    pub session: usize,
+    pub at: Instant,
+}
+
+/// Entrada de la paleta.
+pub struct Item {
+    pub icon: &'static str,
+    pub label: String,
+    pub action: Action,
+    /// Posiciones (en caracteres) que coinciden con la búsqueda, para resaltarlas.
+    pub hits: Vec<usize>,
+}
+
 #[derive(Clone)]
 pub enum Action {
     Spawn(usize, bool),
@@ -66,12 +83,29 @@ pub struct App {
     pub theme: Theme,
     /// Panel de revisión git abierto sobre la carpeta de una sesión.
     pub git: Option<git::GitView>,
+    /// Barra lateral visible (Ctrl+Space s).
+    pub sidebar: bool,
+    pub toasts: Vec<Toast>,
+    /// Origen del reloj de animación (spinner).
+    pub started: Instant,
+    /// Zonas clicables calculadas en el último render.
+    pub hit_new: ratatui::layout::Rect,
+    pub hit_toasts: Vec<(ratatui::layout::Rect, usize)>,
+    last_clock: u64,
 }
 
-/// Coincidencia difusa: las letras de `q` aparecen en orden en `s`.
+/// Coincidencia difusa: posiciones de `s` donde aparecen, en orden, las letras de `q`.
+pub fn fuzzy_pos(q: &str, s: &str) -> Option<Vec<usize>> {
+    let mut it = s.chars().enumerate();
+    let mut hits = vec![];
+    for c in q.chars().filter(|c| !c.is_whitespace()).flat_map(char::to_lowercase) {
+        hits.push(it.by_ref().find(|(_, x)| x.to_lowercase().eq(std::iter::once(c)))?.0);
+    }
+    Some(hits)
+}
+
 pub fn fuzzy(q: &str, s: &str) -> bool {
-    let mut it = s.chars().flat_map(char::to_lowercase);
-    q.chars().flat_map(char::to_lowercase).filter(|c| !c.is_whitespace()).all(|c| it.any(|x| x == c))
+    fuzzy_pos(q, s).is_some()
 }
 
 impl App {
@@ -94,7 +128,17 @@ impl App {
             quit: false,
             theme: Theme::default(),
             git: None,
+            sidebar: true,
+            toasts: vec![],
+            started: Instant::now(),
+            hit_new: Default::default(),
+            hit_toasts: vec![],
+            last_clock: 0,
         }
+    }
+
+    pub fn sidebar_w(&self) -> u16 {
+        if self.sidebar { ui::SIDEBAR } else { 0 }
     }
 
     pub fn cur(&mut self) -> Option<&mut Session> {
@@ -203,27 +247,51 @@ impl App {
         }
     }
 
-    pub fn palette_items(&self) -> Vec<(String, Action)> {
-        let mut v = vec![];
+    pub fn palette_items(&self) -> Vec<Item> {
+        let mut v: Vec<(&'static str, String, Action)> = vec![];
         for (i, p) in self.cfg.presets.iter().enumerate() {
-            v.push((format!("nuevo {}  ·  {}", p.name, p.cmd), Action::Spawn(i, false)));
+            let icon = if p.agent { "▶" } else { "$" };
+            v.push((icon, format!("nuevo {}  ·  {}", p.name, p.cmd), Action::Spawn(i, false)));
         }
         for (i, p) in self.cfg.presets.iter().enumerate().filter(|(_, p)| p.agent) {
-            v.push((format!("nuevo {} en git worktree aislado", p.name), Action::Spawn(i, true)));
+            v.push(("⎇", format!("nuevo {} en git worktree aislado", p.name), Action::Spawn(i, true)));
         }
         for (i, s) in self.sessions.iter().enumerate() {
             let what = if s.agent { s.title().to_string() } else { s.cwd.display().to_string() };
-            v.push((format!("ir a {} {}  ·  {}  {what}", i + 1, s.name, s.status.label()), Action::Focus(i)));
+            v.push(("→", format!("ir a {} {}  ·  {}  {what}", i + 1, s.name, s.status.label()), Action::Focus(i)));
         }
-        v.push(("revisar cambios (git): diff, stage, commit, push".into(), Action::Git));
-        v.push(("vista grid (overview de agentes)".into(), Action::Grid));
-        v.push(("broadcast: mismo prompt a todos los agentes".into(), Action::Broadcast));
-        v.push(("cerrar sesión actual".into(), Action::Close));
-        v.push(("salir de kp".into(), Action::Quit));
-        for (i, (name, _)) in THEMES.iter().enumerate() {
-            v.push((format!("tema: {name}"), Action::Theme(i)));
+        v.push(("±", "revisar cambios (git): diff, stage, commit, push".into(), Action::Git));
+        v.push(("▦", "vista grid (overview de agentes)".into(), Action::Grid));
+        v.push(("≋", "broadcast: mismo prompt a todos los agentes".into(), Action::Broadcast));
+        v.push(("✕", "cerrar sesión actual".into(), Action::Close));
+        v.push(("⏻", "salir de kp".into(), Action::Quit));
+        for (i, (name, ..)) in THEMES.iter().enumerate() {
+            v.push(("◐", format!("tema: {name}"), Action::Theme(i)));
         }
-        v.into_iter().filter(|(label, _)| fuzzy(&self.input, label)).collect()
+        let mut items: Vec<Item> = v
+            .into_iter()
+            .filter_map(|(icon, label, action)| fuzzy_pos(&self.input, &label).map(|hits| Item { icon, label, action, hits }))
+            .collect();
+        // Relevancia: primero el texto literal, luego las coincidencias más compactas (orden estable).
+        let q: String = self.input.to_lowercase().split_whitespace().collect();
+        items.sort_by_key(|it| {
+            let literal = it.label.to_lowercase().replace(' ', "").contains(&q);
+            let spread = it.hits.last().zip(it.hits.first()).map_or(0, |(l, f)| l - f);
+            (!literal, spread)
+        });
+        items
+    }
+
+    /// Tema que se previsualiza al recorrer la paleta (sin aplicarlo todavía).
+    pub fn preview_theme(&self) -> Option<Theme> {
+        if self.mode != Mode::Palette {
+            return None;
+        }
+        let items = self.palette_items();
+        match items.get(self.sel.min(items.len().saturating_sub(1)))?.action {
+            Action::Theme(i) => self.cfg.theme_named(THEMES[i].0).ok(),
+            _ => None,
+        }
     }
 
     fn run(&mut self, a: Action) {
@@ -241,7 +309,7 @@ impl App {
             }
             Action::Grid => self.grid = !self.grid,
             Action::Git => self.open_git(),
-            Action::Theme(i) => match Theme::build(THEMES[i].0, &self.cfg.colors) {
+            Action::Theme(i) => match self.cfg.theme_named(THEMES[i].0) {
                 Ok(t) => {
                     self.theme = t;
                     self.msg = format!("tema {} (fíjalo con theme = \"{}\" en la config)", THEMES[i].0, THEMES[i].0);
@@ -313,6 +381,7 @@ impl App {
             }
             K::Char('g') => self.run(Action::Grid),
             K::Char('r') => self.run(Action::Git),
+            K::Char('s') => self.sidebar = !self.sidebar,
             K::Char('b') => self.run(Action::Broadcast),
             K::Char('w') => self.run(Action::Close),
             K::Char('q') => self.run(Action::Quit),
@@ -364,12 +433,12 @@ impl App {
                 self.sel = 0;
             }
             K::Up => self.sel = self.sel.saturating_sub(1),
-            K::Down | K::Tab => self.sel += 1,
+            K::Down | K::Tab => self.sel = (self.sel + 1).min(self.palette_items().len().saturating_sub(1)),
             K::Enter if self.mode == Mode::Palette => {
                 self.mode = Mode::Normal;
                 let items = self.palette_items();
-                if let Some((_, a)) = items.get(self.sel.min(items.len().saturating_sub(1))) {
-                    self.run(a.clone());
+                if let Some(item) = items.get(self.sel.min(items.len().saturating_sub(1))) {
+                    self.run(item.action.clone());
                 }
             }
             K::Enter => {
@@ -391,7 +460,25 @@ impl App {
     }
 
     fn on_mouse(&mut self, m: event::MouseEvent) {
-        let in_sidebar = m.column < ui::SIDEBAR;
+        let in_sidebar = m.column < self.sidebar_w();
+        let hit = |r: &ratatui::layout::Rect| r.contains(ratatui::layout::Position::new(m.column, m.row));
+        if m.kind == MouseEventKind::Down(MouseButton::Left) {
+            if let Some(&(_, id)) = self.hit_toasts.iter().find(|(r, _)| hit(r)) {
+                self.toasts.retain(|t| t.session != id);
+                if let Some(i) = self.idx(id) {
+                    self.git = None;
+                    self.grid = false;
+                    self.set_focus(i);
+                }
+                return;
+            }
+            if hit(&self.hit_new) {
+                self.input.clear();
+                self.sel = 0;
+                self.mode = Mode::Palette;
+                return;
+            }
+        }
         if let (Some(g), false) = (self.git.as_mut(), in_sidebar) {
             let req = match m.kind {
                 MouseEventKind::Down(MouseButton::Left) => g.click(m.column, m.row),
@@ -513,12 +600,29 @@ impl App {
         for (i, s) in self.sessions.iter_mut().enumerate() {
             let (c, r) = s.tick(&self.cfg.waiting_patterns, i == self.focus && !self.grid && self.git.is_none());
             changed |= c;
-            ring |= r;
+            if r {
+                ring = true;
+                let text = match s.status {
+                    Status::Waiting => format!("{} necesita tu decisión", s.name),
+                    Status::Exited => format!("{} salió", s.name),
+                    _ => format!("{} terminó", s.name),
+                };
+                self.toasts.retain(|t| t.session != s.id);
+                self.toasts.push(Toast { text, status: s.status, session: s.id, at: Instant::now() });
+            }
         }
         if ring && self.cfg.bell {
             let _ = std::io::stdout().write_all(b"\x07");
         }
-        changed
+        let n = self.toasts.len();
+        self.toasts.retain(|t| t.at.elapsed() < Duration::from_secs(6));
+        self.toasts.truncate(4);
+        // Repinta para el spinner (si algo trabaja), la caducidad de avisos y los relojes (1 vez/s).
+        let clock = self.started.elapsed().as_secs();
+        let tick_clock = clock != self.last_clock;
+        self.last_clock = clock;
+        let animating = self.sessions.iter().any(|s| s.status == Status::Working);
+        changed || animating || tick_clock || n != self.toasts.len()
     }
 }
 
@@ -529,7 +633,7 @@ uso:
   kp ctl <cmd>      controla kp desde dentro de una sesión (kp ctl help)
 
 teclas (prefijo Ctrl+Space):
-  n shell nuevo · p/a paleta · r revisar (git) · g grid · b broadcast · j/k o 1-9 cambiar sesión
+  n shell nuevo · p/a paleta · r revisar (git) · g grid · b broadcast · s panel lateral · j/k o 1-9 cambiar sesión
   u/d scroll · w cerrar · q salir · Ctrl+Space dos veces envía Ctrl+Space";
 
 fn main() {
@@ -575,11 +679,11 @@ fn run(project: PathBuf) -> std::io::Result<()> {
     let mut term = ratatui::init();
     execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
     let mut app = App::new(cfg, project, env, tx);
-    app.resize(term.size()?.height.saturating_sub(1), term.size()?.width.saturating_sub(ui::SIDEBAR));
+    app.resize(term.size()?.height.saturating_sub(2), term.size()?.width.saturating_sub(ui::SIDEBAR));
     if let Err(e) = app.spawn(app.shell_preset(), false, None, true) {
         app.msg = e;
     }
-    match Theme::build(&app.cfg.theme, &app.cfg.colors) {
+    match app.cfg.theme_named(&app.cfg.theme) {
         Ok(t) => app.theme = t,
         Err(e) => app.msg = e,
     }
@@ -634,10 +738,22 @@ mod tests {
 
     #[test]
     fn fuzzy_matches() {
+        assert_eq!(fuzzy_pos("ncl", "nuevo claude"), Some(vec![0, 6, 7]));
+        assert_eq!(fuzzy_pos("ñ", "año"), Some(vec![1]));
         assert!(fuzzy("ncl", "nuevo claude"));
         assert!(fuzzy("", "x"));
         assert!(fuzzy("GRID", "vista grid"));
         assert!(!fuzzy("zz", "nuevo claude"));
+    }
+
+    #[test]
+    fn palette_ranks_literal_first() {
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(Config::default(), PathBuf::from("C:/Temp/x"), vec![], tx);
+        app.input = "tema".into();
+        assert!(app.palette_items()[0].label.starts_with("tema:"));
+        app.input = "grid".into();
+        assert!(matches!(app.palette_items()[0].action, Action::Grid));
     }
 
     /// API ctl de punta a punta: servidor TCP + token + despacho a App + sesión PTY real.

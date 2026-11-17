@@ -82,6 +82,11 @@ pub struct Session {
     /// Terminó o se bloqueó mientras no lo mirabas.
     pub attention: bool,
     pub scroll: usize,
+    /// Desde cuándo está en el estado actual.
+    pub since: Instant,
+    /// Rama git de su carpeta (se relee cada pocos segundos).
+    pub branch: Option<String>,
+    branch_at: Instant,
     last_output: Instant,
     exited: bool,
     writer: Box<dyn Write + Send>,
@@ -187,6 +192,9 @@ impl Session {
             status: Status::Working,
             attention: false,
             scroll: 0,
+            since: Instant::now(),
+            branch: crate::git::branch(cwd),
+            branch_at: Instant::now(),
             last_output: Instant::now(),
             exited: false,
             writer,
@@ -266,6 +274,13 @@ impl Session {
         }
         if visible {
             self.attention = false;
+        }
+        if old != self.status {
+            self.since = Instant::now();
+        }
+        if self.branch_at.elapsed() > Duration::from_secs(3) {
+            self.branch_at = Instant::now();
+            self.branch = crate::git::branch(&self.cwd);
         }
         (old != self.status || ring, ring)
     }

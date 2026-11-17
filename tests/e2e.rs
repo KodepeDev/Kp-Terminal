@@ -25,6 +25,7 @@ impl Kp {
         std::fs::create_dir_all(&cfgdir).unwrap();
         cmd.env("APPDATA", &cfgdir);
         cmd.env("XDG_CONFIG_HOME", &cfgdir);
+        cmd.env_remove("NO_COLOR"); // la sesión que ejecuta los tests puede tenerla definida
         let child = pty.slave.spawn_command(cmd).unwrap();
         drop(pty.slave);
         let mut reader = pty.master.try_clone_reader().unwrap();
@@ -145,12 +146,12 @@ fn git_panel() {
     kp.send(b"r");
     kp.wait_for(20, "panel git", |s| s.contains("Cambios 1") && s.contains("+linea-nueva"));
 
-    // Clic (SGR 1006, coordenadas 1-based) sobre el botón "+ Stage" de la barra.
+    // Clic (SGR 1006, coordenadas 1-based) sobre el botón Stage (" s + " compacto o " s + Stage ").
     let (row, col) = {
         let p = kp.parser.lock().unwrap();
         let rows: Vec<String> = p.screen().rows(0, 140).collect();
-        let r = rows.iter().position(|l| l.contains("+ Stage")).expect("botón Stage visible");
-        let c = rows[r][..rows[r].find("+ Stage").unwrap()].chars().count();
+        let r = rows.iter().position(|l| l.contains(" s + ")).expect("botón Stage visible");
+        let c = rows[r][..rows[r].find(" s + ").unwrap()].chars().count() + 1;
         (r + 1, c + 2)
     };
     kp.send(format!("\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m").as_bytes());
@@ -199,4 +200,89 @@ fn real_agent() {
     });
     println!("{}", kp.screen());
     kp.quit();
+}
+
+/// Vuelca la pantalla con sus colores a HTML (para revisar el diseño en un navegador).
+fn snapshot_html(kp: &Kp, name: &str) {
+    let p = kp.parser.lock().unwrap();
+    let scr = p.screen();
+    let (rows, cols) = scr.size();
+    let css = |c: vt100::Color, default: &str| match c {
+        vt100::Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+        vt100::Color::Idx(i) => format!("var(--c{i})"),
+        vt100::Color::Default => default.to_string(),
+    };
+    let mut html = String::from(
+        "<html><head><meta charset='utf-8'></head><body style='margin:0;background:#000'><pre style='font:15px/19px Consolas,monospace;margin:0'>",
+    );
+    for r in 0..rows.get() {
+        for c in 0..cols.get() {
+            let Some(cell) = scr.cell(r, c) else { continue };
+            if cell.is_wide_continuation() {
+                continue;
+            }
+            let (mut fg, mut bg) = (css(cell.fgcolor(), "#ddd"), css(cell.bgcolor(), "#000"));
+            if cell.inverse() {
+                std::mem::swap(&mut fg, &mut bg);
+            }
+            let ch = match cell.contents() {
+                "" => " ".to_string(),
+                "<" => "&lt;".into(),
+                "&" => "&amp;".into(),
+                s => s.to_string(),
+            };
+            let weight = if cell.bold() { "bold" } else { "normal" };
+            html += &format!("<span style='display:inline-block;height:19px;color:{fg};background:{bg};font-weight:{weight}'>{ch}</span>");
+        }
+        html.push('\n');
+    }
+    html += "</pre></body></html>";
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target").join("kp-snapshots");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("{name}.html")), html).unwrap();
+}
+
+/// `cargo test --test e2e snapshots -- --ignored` → target/kp-snapshots/*.html
+#[test]
+#[ignore]
+fn snapshots() {
+    let dir = std::env::temp_dir().join(format!("kp-snap-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "-q", "-b", "main"]);
+    std::fs::write(dir.join("app.rs"), "fn main() {\n    println!(\"hola\");\n}\n").unwrap();
+    let kp = Kp::start(&dir);
+    kp.wait_for(20, "sidebar", |s| s.contains("1 shell"));
+    std::thread::sleep(Duration::from_secs(2));
+    kp.send(if cfg!(windows) { b"Get-ChildItem; Write-Host 'listo' -ForegroundColor Green\r" } else { b"ls --color; echo listo\r" });
+    std::thread::sleep(Duration::from_secs(2));
+    kp.send(PREFIX);
+    kp.send(b"n");
+    kp.wait_for(20, "2 shell", |s| s.contains("2 shell"));
+    std::thread::sleep(Duration::from_secs(2));
+    snapshot_html(&kp, "1-sesion");
+    kp.send(PREFIX);
+    std::thread::sleep(Duration::from_millis(500));
+    snapshot_html(&kp, "2-which-key");
+    kp.send(b"p");
+    kp.send(b"tema");
+    std::thread::sleep(Duration::from_millis(600));
+    snapshot_html(&kp, "3-paleta-temas");
+    kp.send(b" light");
+    std::thread::sleep(Duration::from_millis(600));
+    snapshot_html(&kp, "3b-preview-light");
+    kp.send(ESC);
+    kp.wait_for(20, "cierre paleta", |s| !s.contains("resultados"));
+    kp.send(PREFIX);
+    kp.send(b"r");
+    kp.wait_for(20, "panel git", |s| s.contains("Cambios"));
+    std::thread::sleep(Duration::from_millis(500));
+    snapshot_html(&kp, "4-git");
+    kp.send(b"q");
+    kp.send(PREFIX);
+    kp.send(b"g");
+    std::thread::sleep(Duration::from_millis(800));
+    snapshot_html(&kp, "5-grid");
+    kp.quit();
+    let _ = std::fs::remove_dir_all(&dir);
 }
